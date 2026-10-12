@@ -922,8 +922,8 @@ RSpec.describe "brew internals", type: :system do
     it "carries on, within one call, past a dependency it already tried for another formula, even if that " \
        "failed, so `brew install-timed` and `brew upgrade-timed` never give one call two formulae that need it" do
       source = brew_source("formula_installer.rb")
-      expect([source.include?("raise FormulaInstallationAlreadyAttemptedError, formula if " \
-                              "self.class.attempted.include?(formula)"),
+      expect([source.include?("return unless self.class.attempted.any? { same_formula?(it) }\n\n    " \
+                              "raise FormulaInstallationAlreadyAttemptedError, formula\n"),
               source.include?("self.class.attempted << formula"),
               body.include?("raise unless e.is_a? FormulaInstallationAlreadyAttemptedError")])
         .to eq([true, true, true])

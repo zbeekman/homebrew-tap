@@ -249,7 +249,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_formula("dep")
       stub_formula("app", deps: %w[dep])
       expect { run_command("--dry-run", "app") }
-        .to output(/\A==> Would install 1 formula:\napp 2\.0\n==> Would install 1 dependency for app:\ndep\n/)
+        .to output(/\A==> Would install 1 formula:\napp 2\.0\n==> Would install 1 dependency for app:\ndep 2\.0\n/)
         .to_stdout
     end
 
@@ -736,7 +736,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_formula("lib", "1.0")
       stub_formula("app", deps: %w[lib], bottled: true, bottle_deps: { "lib" => "1.0" })
       expect(Homebrew::Ask).to receive(:confirm?).once.and_return(true)
-      expect { run_to_end("app") }.to output(/^==> Would upgrade 1 dependency for app:\nlib\n/).to_stdout
+      expect { run_to_end("app") }.to output(/^==> Would upgrade 1 dependency for app:\nlib 1\.0 -> 2\.0\n/).to_stdout
     end
 
     it "asks when brew would install a dependency of a named formula" do
