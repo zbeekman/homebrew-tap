@@ -40,7 +40,7 @@ class FlangHeaders < Formula
     rm include/"flang/ISO_Fortran_binding.h" # `flang` already links it
 
     # Header-only stand-in so `find_package(Flang)` works. It ships no Flang libraries: a plugin
-    # linking its own copy duplicates MLIR singletons and can miscompile (llvm/llvm-project#219579).
+    # linking its own copy would duplicate MLIR singletons (llvm/llvm-project#219579).
     (lib/"cmake/flang").install "build/cmake/modules/CMakeFiles/FlangConfigVersion.cmake"
     (lib/"cmake/flang/FlangConfig.cmake").write <<~CMAKE
       set(FLANG_CMAKE_DIR "#{opt_lib}/cmake/flang")
