@@ -170,6 +170,13 @@ RSpec.describe Timed::BuildLog do
 
   describe ".update" do
     let(:change) { ->(log) { log.record("foo", { "version" => "1" }) } }
+    let(:too_deep) { (1..150).reduce([]) { |inner, _| [inner] } }
+    # The depth the json gem reports changes between its versions.
+    let(:nesting_message) do
+      JSON.generate(too_deep)
+    rescue JSON::NestingError => e
+      e.message
+    end
 
     it "refuses to write an invalid record, naming the path, package and build, and leaves the file as it was" do
       path.dirname.mkpath
@@ -184,9 +191,7 @@ RSpec.describe Timed::BuildLog do
         "Rational"        => [{ "wall_seconds" => Rational(1, 2) },
                               "`wall_seconds` of build 0 of package `foo` must be a number of seconds " \
                               "from 0 to 604800."],
-        "nesting"         => [{ "version" => (1..150).reduce([]) { |inner, _| [inner] } },
-                              "nesting of 100 is too deep. " \
-                              "Did you try to serialize objects with circular references?"],
+        "nesting"         => [{ "version" => too_deep }, nesting_message],
         "Complex"         => [{ "build_seconds" => Complex(1, 2) },
                               "`build_seconds` of build 0 of package `foo` must be a number of seconds " \
                               "from 0 to 604800."],

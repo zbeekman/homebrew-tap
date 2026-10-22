@@ -233,16 +233,18 @@ RSpec.describe Timed::Casks do
         .to eq(upgrading.to_h { |verb| [verb, ["foo"]] })
     end
 
-    it "puts a cask with `signal` last when `on_upgrade` includes it, for a dialog" do
-      symbol = cask { uninstall signal: ["TERM", "com.foo"], on_upgrade: :signal }
-      directives = { signal: ["TERM", "com.foo"], on_upgrade: [:signal] }
-      expect([kinds(plan(symbol).last), kinds(plan(cask { uninstall(**directives) }).last)])
-        .to eq([[:dialog], [:dialog]])
-    end
-
-    it "ignores a bare string `on_upgrade`, which brew doesn't honour" do
-      directives = { signal: ["TERM", "com.foo"], on_upgrade: "signal" }
-      expect(tokens(plan(cask { uninstall(**directives) }).first)).to eq(["foo"])
+    it "puts a cask with `signal` last only when `on_upgrade` names it, as brew reads it with `Array()` and " \
+       "`to_s`, for a dialog" do
+      named = [:signal, [:signal], "signal", ["signal"], [:quit, :signal]]
+      on_upgrades = [*named, :quit, "quit"]
+      actual = on_upgrades.to_h do |on_upgrade|
+        directives = { signal: ["TERM", "com.foo"], on_upgrade: }
+        result = plan(cask { uninstall(**directives) })
+        [on_upgrade, [tokens(result.first), kinds(result.last)]]
+      end
+      expect(actual).to eq(on_upgrades.to_h do |on_upgrade|
+        [on_upgrade, named.include?(on_upgrade) ? [[], [:dialog]] : [["foo"], []]]
+      end)
     end
 
     it "leaves a cask with `login_item` first on upgrade and reinstall, as brew returns early" do
@@ -568,7 +570,6 @@ RSpec.describe Timed::Casks do
     let(:dialog_directives) do
       {
         "quit"       => { quit: "com.foo" },
-        "signal"     => { signal: ["TERM", "com.foo"] },
         "login_item" => { login_item: "Foo" },
       }
     end
@@ -582,12 +583,26 @@ RSpec.describe Timed::Casks do
         .to eq({ "reinstall --zap" => [:dialog], "reinstall" => [], "upgrade --zap" => [] })
     end
 
-    it "still skips `uninstall signal` unless `on_upgrade` names it" do
-      old = cask { uninstall signal: ["TERM", "com.foo"] }
-      expect(tokens(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).first)).to eq(["foo"])
+    it "skips `signal` of the `uninstall` and `zap` stanzas unless the stanza's own `on_upgrade` names it, " \
+       "as brew zaps with `reinstall`" do
+      olds = {
+        "uninstall"                 => cask { uninstall signal: ["TERM", "com.foo"] },
+        "zap"                       => cask { zap signal: ["TERM", "com.foo"] },
+        "zap, on_upgrade"           => cask { zap signal: ["TERM", "com.foo"], on_upgrade: :signal },
+        "zap, uninstall on_upgrade" => cask do
+          uninstall signal: ["TERM", "com.foo"], on_upgrade: :signal
+
+          zap signal: ["TERM", "com.foo"]
+        end,
+      }
+      actual = olds.transform_values do |old|
+        messages(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).last)
+      end
+      expect(actual).to eq({ "uninstall" => [], "zap" => [], "zap, on_upgrade" => ["`zap signal` may raise a dialog"],
+                             "zap, uninstall on_upgrade" => ["`uninstall signal` may raise a dialog"] })
     end
 
-    it "classifies every directive of the installed cask's `zap` stanza, unfiltered" do
+    it "classifies every other directive of the installed cask's `zap` stanza" do
       kinds_by_name = root_directives.merge(dialog_directives).to_h do |name, directives|
         old = cask { zap(**directives) }
         [name, kinds(plan(cask, verb: :reinstall, installed: { "foo" => old }, zap: true).last)]

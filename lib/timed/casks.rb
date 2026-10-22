@@ -150,7 +150,8 @@ module Timed
     # bundle).
     #
     # `zap` is `reinstall --zap`, which brew alone honours: it uninstalls the
-    # installed cask without a successor and dispatches its `zap` stanza.
+    # installed cask without a successor and dispatches its `zap` stanza with
+    # its `uninstall` stanza, still as a reinstall.
     #
     # `needs` maps a cask to the formulae and the casks it needs that are in
     # the run, e.g. through its formulae's dependencies, which brew may install
@@ -331,24 +332,17 @@ module Timed
     SCRIPT_UNINSTALL_DIRECTIVES = [:script, :early_script].freeze
 
     # With `reinstall --zap` brew passes no `successor`, so `login_item` runs,
-    # and after the `uninstall` stanza it dispatches every directive of the
-    # `zap` stanza, unfiltered (`Installer#zap`).
+    # and it dispatches the `zap` stanzas' directives with the `uninstall`
+    # stanza's, still as a reinstall (`Installer#zap`).
     sig { params(cask: Cask::Cask, zap: T::Boolean).returns(T::Array[Reason]) }
     def self.uninstall_directives(cask, zap:)
-      reasons = cask.artifacts.grep(Cask::Artifact::Uninstall).flat_map do |artifact|
-        # Brew skips `signal` on upgrade and reinstall unless `on_upgrade` names it.
-        raw_on_upgrade = artifact.directives[:on_upgrade]
-        on_upgrade = case raw_on_upgrade
-        when Symbol then [raw_on_upgrade]
-        when Array then raw_on_upgrade.map(&:to_sym)
-        else []
-        end
-        directive_reasons(artifact, "uninstall", signal: on_upgrade.include?(:signal), login_item: zap)
-      end
-      return reasons unless zap
-
-      reasons + cask.artifacts.grep(Cask::Artifact::Zap).flat_map do |artifact|
-        directive_reasons(artifact, "zap", signal: true, login_item: true)
+      stanzas = [*cask.artifacts.grep(Cask::Artifact::Uninstall),
+                 *(zap ? cask.artifacts.grep(Cask::Artifact::Zap) : [])]
+      stanzas.flat_map do |stanza|
+        # Brew skips `signal` on upgrade and reinstall unless the stanza's
+        # `on_upgrade` names it (`AbstractUninstall.dispatch_directives`).
+        on_upgrade = Array(stanza.directives[:on_upgrade]).map { |name| name.to_s.to_sym }
+        directive_reasons(stanza, stanza.class.dsl_key.to_s, signal: on_upgrade.include?(:signal), login_item: zap)
       end
     end
 

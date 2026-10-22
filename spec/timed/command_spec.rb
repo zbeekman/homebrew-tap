@@ -224,10 +224,10 @@ RSpec.describe Timed::Command do
         target = mktmpdir/"Foo.app"
         target.mkpath
         target.chmod(0555)
-        casks = { reinstall: [stub_cask("old", installed_stanzas: 'zap signal: ["TERM", "com.old"]')],
+        casks = { reinstall: [stub_cask("old", installed_stanzas: 'zap quit: "com.old"')],
                   install:   [stub_cask("new", nil, stanzas: "app \"Foo.app\", target: \"#{target}\"")] }
         expect([true, false].to_h { |given| [given, placed(plan(casks, zap: given, force: given))[:last]] })
-          .to eq(true  => { "old" => ["`zap signal` may raise a dialog"],
+          .to eq(true  => { "old" => ["`zap quit` may raise a dialog"],
                             "new" => ["`app` target `#{target}` is not writable"] },
                  false => {})
       ensure
