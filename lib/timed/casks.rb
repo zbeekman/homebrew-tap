@@ -138,9 +138,10 @@ module Timed
     # casks from different taps may share a token.
     #
     # `installed` maps a cask to the one loaded from its installed caskfile.
-    # On upgrade and reinstall brew runs the `uninstall_phase` of every artifact
-    # of that cask, so the uninstall side (`uninstall` directives, uninstall
-    # flight blocks and steps, and its bundles and links) applies to it (to the
+    # On upgrade and reinstall brew runs the `uninstall_phase` of every other
+    # artifact of that cask and dispatches its `uninstall` directives, so the
+    # uninstall side (`uninstall` directives, uninstall flight blocks and
+    # steps, and its bundles and links) applies to it (to the
     # new cask when it is missing), and brew merges its config into the new
     # cask's, as `Cask::Upgrade` does: this assigns `Cask#config` of the new
     # casks.

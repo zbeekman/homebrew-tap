@@ -398,7 +398,8 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "uninstalling a cask" do
-    it "runs the `uninstall_phase` of every artifact that has one, on upgrade and on reinstall" do
+    it "runs the `uninstall_phase` of every artifact but `uninstall` and `zap`, whose directives it dispatches " \
+       "around them, on upgrade and on reinstall" do
       body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
       phase = "artifact.uninstall_phase(command: @command, verbose: verbose?, skip: clear, force: force?, successor:,"
       filters = /\b(?:grep|grep_v|select|reject|filter_map|partition|next|each)\b|_phase\(/

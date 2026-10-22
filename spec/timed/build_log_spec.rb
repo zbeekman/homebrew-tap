@@ -174,6 +174,7 @@ RSpec.describe Timed::BuildLog do
     # The depth the json gem reports changes between its versions.
     let(:nesting_message) do
       JSON.generate(too_deep)
+      raise "expected `JSON::NestingError`"
     rescue JSON::NestingError => e
       e.message
     end
