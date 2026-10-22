@@ -19,6 +19,9 @@ Utils::GemSetup.install_bundler_gems!(groups: %w[style tests]) # rubocop:disable
 Homebrew::EnvConfig::ENVS.each_key do |env|
   ENV.delete(env.to_s) unless [:HOMEBREW_CACHE, :HOMEBREW_LOGS, :HOMEBREW_TEMP].include?(env)
 end
+# Nor the `-timed` commands' own settings, which brew doesn't know; a spec
+# that needs one sets it itself.
+ENV.keys.grep(/\AHOMEBREW_TIMED_/).each { |env| ENV.delete(env) }
 # Nor a proxy of the shell, which curl would send even a request to
 # `localhost` through, past the network guard. These are the upper-case ones
 # `bin/brew` passes on (`HTTPS_PROXY`, `FTP_PROXY`, `ALL_PROXY`); the

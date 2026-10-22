@@ -24,6 +24,10 @@ RSpec.describe "the spec harness", type: :system do
     expect(ENV.keys.grep(/\A(?:http|https|ftp|all)_proxy\z/i)).to be_empty
   end
 
+  it "runs without the `-timed` commands' settings of the shell, e.g. LLM estimates" do
+    expect(ENV.keys.grep(/\AHOMEBREW_TIMED_/)).to be_empty
+  end
+
   it "checks Sorbet signatures at runtime" do
     not_a_number = T.let("1", T.untyped) # hides the mistake from the static check
     expect { HarnessSpec::SigProbe.new.double(not_a_number) }.to raise_error(TypeError)
