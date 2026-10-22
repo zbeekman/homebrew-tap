@@ -157,10 +157,10 @@ installed, as `brew reinstall` does, so it has no old version to uninstall, and
 with `--force` an existing app in its way counts, as for
 [`brew install-timed`](install-timed.md#casks). With `--zap`, Homebrew
 uninstalls the old version without a successor, so its `uninstall login_item`
-counts as a dialog, and runs the directives of its `zap` stanza with those of
-its `uninstall` stanza, so those that run as root or may raise a dialog count:
-`login_item` always, and `signal` only when that stanza's `on_upgrade` names
-it, as Homebrew still treats this as a reinstall.
+counts as a dialog. Homebrew also runs the directives of its `zap` stanza with
+those of its `uninstall` stanza, so those that run as root or may raise a
+dialog count: `login_item` always, and `signal` only when that stanza's
+`on_upgrade` names it, as Homebrew still treats this as a reinstall.
 
 The uninstall side is read from the cask as installed, as Homebrew loads it
 to reinstall it. With tap trust on (the default unless
