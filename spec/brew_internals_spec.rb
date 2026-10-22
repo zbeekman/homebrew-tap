@@ -35,6 +35,33 @@ RSpec.describe "brew internals", type: :system do
   # like; shorthand `sudo:` gives `""`.
   def sudo_values(path) = brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten
 
+  # `stanza` is Cask DSL source: Sorbet cannot see the DSL's generated methods.
+  def artifacts(stanza)
+    Cask::Cask.new("timed-canary") do
+      version "1.0"
+      sha256 :no_check
+      url "file:///dev/null"
+      instance_eval(stanza, __FILE__, __LINE__)
+    end.artifacts
+  end
+
+  # `[stanza, directive]` for each directive with a value that
+  # `AbstractUninstall.dispatch_directives` dispatches, run with `options`
+  # over the `uninstall` and then the `zap` stanzas of `stanzas` (Cask DSL
+  # source), as `Installer#uninstall_artifacts` orders them.
+  def dispatched(stanzas, **options)
+    all = artifacts(stanzas)
+    directive_artifacts = [*all.grep(Cask::Artifact::Uninstall), *all.grep(Cask::Artifact::Zap)]
+    calls = []
+    directive_artifacts.each do |stanza|
+      allow(stanza).to receive(:dispatch_uninstall_directive) do |directive|
+        calls << [stanza.class.dsl_key, directive] if stanza.directives[directive].present?
+      end
+    end
+    Cask::Artifact::AbstractUninstall.dispatch_directives(directive_artifacts, command: SystemCommand, **options)
+    calls
+  end
+
   describe "tap commands" do
     it "are only found when executable" do
       dir = mktmpdir
@@ -85,16 +112,6 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "Cask::Artifact::AbstractArtifact#requires_sudo?" do
-    # `stanza` is Cask DSL source: Sorbet cannot see the DSL's generated methods.
-    def artifacts(stanza)
-      Cask::Cask.new("timed-canary") do
-        version "1.0"
-        sha256 :no_check
-        url "file:///dev/null"
-        instance_eval(stanza, __FILE__, __LINE__)
-      end.artifacts
-    end
-
     it "is true for the stanzas that need root" do
       stanzas = {
         "pkg"                  => 'pkg "Foo.pkg"',
@@ -219,21 +236,17 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`uninstall signal` on upgrade and reinstall" do
-    it "is skipped unless `on_upgrade` names it" do
-      expect(Cask::Artifact::Uninstall::UPGRADE_REINSTALL_SKIP_DIRECTIVES).to eq([:signal])
-      expect(brew_source("cask/artifact/uninstall.rb")).to include(
-        "(upgrade || reinstall) &&",
-        "UPGRADE_REINSTALL_SKIP_DIRECTIVES.include?(directive_sym) &&",
-        "on_upgrade_set.exclude?(directive_sym)",
-      )
-    end
-
-    it "reads `on_upgrade` from a Symbol or an Array only" do
-      body = brew_source("cask/artifact/uninstall.rb")[/^        on_upgrade_syms =\n.*?^          end$/m]
-      expect(body.gsub(/\s+/, " ").strip).to eq(
-        "on_upgrade_syms = case raw_on_upgrade when Symbol [raw_on_upgrade] when Array " \
-        "raw_on_upgrade.map(&:to_sym) else [] end",
-      )
+    it "is skipped unless `on_upgrade` names it, read with `Array()` and `to_s`, so a String counts" do
+      on_upgrades = [nil, ":quit", ":signal", '"signal"', "[:signal]", '["signal"]']
+      modes = { "upgrade" => { upgrade: true }, "reinstall" => { reinstall: true }, "uninstall" => {} }
+      actual = on_upgrades.to_h do |on_upgrade|
+        stanza = %Q(uninstall signal: ["TERM", "com.foo"]#{", on_upgrade: #{on_upgrade}" if on_upgrade})
+        [on_upgrade, modes.transform_values { |mode| dispatched(stanza, **mode).include?([:uninstall, :signal]) }]
+      end
+      named = { "upgrade" => true, "reinstall" => true, "uninstall" => true }
+      unnamed = { "upgrade" => false, "reinstall" => false, "uninstall" => true }
+      expect(actual).to eq({ nil => unnamed, ":quit" => unnamed, ":signal" => named, '"signal"' => named,
+                             "[:signal]" => named, '["signal"]' => named })
     end
   end
 
@@ -303,24 +316,37 @@ RSpec.describe "brew internals", type: :system do
       expect(body).to match(/Installer\.new\(@cask, .*reinstall: true\)/)
     end
 
-    it "uninstalls the installed cask without a successor, then dispatches its `zap` stanzas" do
+    it "uninstalls the installed cask without a successor, with its `zap` stanzas" do
       body = brew_source("cask/installer.rb")[/^    def zap\n.*?^    end$/m]
-      expect(body.lines.map(&:strip).grep(/uninstall_artifacts|zap_phase|load_installed_caskfile/))
-        .to eq(["load_installed_caskfile!", "uninstall_artifacts",
-                "stanza.zap_phase(command: @command, verbose: verbose?, force: force?)"])
+      expect(body.lines.map(&:strip).grep(/uninstall_artifacts|zap_phase|load_installed_caskfile|zap_stanzas =/))
+        .to eq(["load_installed_caskfile!", "zap_stanzas = @cask.artifacts.grep(Artifact::Zap)",
+                "uninstall_artifacts(clear: true, zap_stanzas:)"])
     end
 
-    it "dispatches every directive of a `zap` stanza, with no `successor` or `upgrade`" do
-      body = brew_source("cask/artifact/zap.rb")[/^      def zap_phase\(.*?^      end$/m]
-      expect(body.lines.map(&:strip).drop(1)).to eq(["dispatch_uninstall_directives(command:, force:)", "end"])
+    it "dispatches the `zap` stanzas after the `uninstall` stanza, with the installer's `successor` and " \
+       "`reinstall`, then again for the deferred directives" do
+      body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
+      calls = body.scan(/AbstractUninstall\.dispatch_directives\((.*?)\)$/m).flatten
+                  .map { |args| args.gsub(/\s+/, " ") }
+      expect([body.include?("directive_artifacts = [*artifacts.grep(Artifact::Uninstall), *zap_stanzas]"), calls])
+        .to eq([true, ["directive_artifacts, command: @command, force: force?, successor:, upgrade: upgrade?, " \
+                       "reinstall: reinstall?, quit:",
+                       "directive_artifacts, command: @command, deferred: true, force: force?, successor:"]])
     end
 
-    it "dispatches every ordered directive in `dispatch_uninstall_directives`" do
-      source = brew_source("cask/artifact/abstract_uninstall.rb")
-      body = source[/^      def dispatch_uninstall_directives\(.*?^      end$/m]
-      expect(body.lines.map(&:strip).drop(1))
-        .to eq(["ORDERED_DIRECTIVES.each do |directive_sym|",
-                "dispatch_uninstall_directive(directive_sym, command:, force:, successor:, upgrade:)", "end", "end"])
+    it "dispatches every directive of the `uninstall` and `zap` stanzas over both passes, but `signal` as a " \
+       "reinstall, unless the stanza's own `on_upgrade` names it" do
+      directives = 'early_script: "e.sh", launchctl: "com.foo", quit: "com.foo", signal: ["TERM", "com.foo"], ' \
+                   'login_item: "Foo", kext: "com.foo", script: "x.sh", pkgutil: "com.foo", ' \
+                   'delete: "/Library/Foo", trash: "~/Foo", rmdir: "~/Foo"'
+      stanzas = { "neither" => "uninstall #{directives}\nzap #{directives}",
+                  "zap's"   => "uninstall #{directives}\nzap #{directives}, on_upgrade: :signal" }
+      actual = stanzas.transform_values do |source|
+        (dispatched(source, reinstall: true) + dispatched(source, deferred: true)).sort
+      end
+      every = [:uninstall, :zap].product(Cask::Artifact::AbstractUninstall::ORDERED_DIRECTIVES)
+      expect(actual).to eq({ "neither" => (every - [[:uninstall, :signal], [:zap, :signal]]).sort,
+                             "zap's"   => (every - [[:uninstall, :signal]]).sort })
     end
 
     it "runs `uninstall_login_item` unless brew passes a `successor`" do
@@ -374,10 +400,23 @@ RSpec.describe "brew internals", type: :system do
   describe "uninstalling a cask" do
     it "runs the `uninstall_phase` of every artifact that has one, on upgrade and on reinstall" do
       body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
-      expect(body).to include("artifacts.each do |artifact|", "if artifact.respond_to?(:uninstall_phase)",
-                              "artifact.uninstall_phase(")
-      expect(body).not_to include("select", "grep", "reject")
-      expect(body.scan(/\bnext\b.*/)).to eq(["next unless artifact.respond_to?(:post_uninstall_phase)"])
+      phase = "artifact.uninstall_phase(command: @command, verbose: verbose?, skip: clear, force: force?, successor:,"
+      filters = /\b(?:grep|grep_v|select|reject|filter_map|partition|next|each)\b|_phase\(/
+      expect(body.lines.map(&:strip).grep(filters))
+        .to eq(["directive_artifacts = [*artifacts.grep(Artifact::Uninstall), *zap_stanzas]",
+                "artifacts.grep_v(Artifact::AbstractUninstall).select { |artifact| " \
+                "artifact.respond_to?(:uninstall_phase) },",
+                ").partition do |artifact|", "preflight.each do |artifact|", phase,
+                "removable.each do |artifact|", phase])
+    end
+
+    it "has a `post_uninstall_phase` only in `uninstall`, which runs its deferred directives" do
+      classes = [*Cask::DSL::ORDINARY_ARTIFACT_CLASSES, *Cask::DSL::ARTIFACT_BLOCK_CLASSES,
+                 *Cask::DSL::INSTALL_STEP_ARTIFACT_CLASSES]
+      body = brew_source("cask/artifact/uninstall.rb")[/^      def post_uninstall_phase\(.*?^      end$/m]
+      expect([classes.select { |klass| klass.method_defined?(:post_uninstall_phase) }, body.lines.map(&:strip)[1]])
+        .to eq([[Cask::Artifact::Uninstall],
+                "AbstractUninstall.dispatch_directives([self], command:, deferred: true, force:, successor:)"])
     end
 
     it "does so from `uninstall` (reinstall) and `start_upgrade`" do
