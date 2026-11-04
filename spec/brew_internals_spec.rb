@@ -742,7 +742,7 @@ RSpec.describe "brew internals", type: :system do
 
     it "installs the taps of the names it is given, then loads every name before it installs anything" do
       expect([install.include?("tap&.ensure_installed!"),
-              install.include?("args.named.to_formulae_and_casks(warn: false)")]).to eq([true, true])
+              install.include?("args.named.to_formulae_and_casks(method: :bottle, warn: false)")]).to eq([true, true])
     end
 
     it "asks by `Install.formulae_ask_prompt_needed?`, through `Install.ask_formulae`, unless `--no-ask` or " \
