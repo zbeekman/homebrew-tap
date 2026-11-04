@@ -78,7 +78,8 @@ module Homebrew
         cask_dependencies = Install.print_dry_run_casks(casks, action:         "reinstall",
                                                                skip_cask_deps: args.skip_cask_deps?)
         # Brew reinstalls the new target of the alias a formula was installed
-        # with.
+        # with, and a formula named twice (e.g. by name and as a file) as
+        # named first.
         latest = named.filter_map do |formula|
           if formula.pinned?
             onoe "#{formula.full_name} is pinned. You must unpin it to reinstall."
@@ -86,7 +87,7 @@ module Homebrew
           end
           formula.latest_formula
         end
-        formulae = latest.to_h { |formula| [formula.full_name, formula] }
+        formulae = latest.uniq(&:full_name).to_h { |formula| [formula.full_name, formula] }
         set = formulae.keys
         installers = formulae.transform_values { |formula| installer(formula) }
         estimates = Timed::Command.estimates(formulae,
@@ -143,10 +144,11 @@ module Homebrew
           Homebrew::Ask.confirm?(action: "reinstallation")
         end
 
+        # Before anything runs, as it stops on a bottle file that is gone.
+        arguments = Timed::Command.path_arguments(args.named, formulae)
         Timed::Runner.run_casks("reinstall", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: forwarded.cask, label: "first")
         last = cask_plan.last.map(&:cask)
-        arguments = Timed::Command.path_arguments(args.named, formulae)
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
                                       roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
                                       needs:   run_dependencies)

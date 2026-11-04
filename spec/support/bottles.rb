@@ -50,4 +50,12 @@ module TimedBottleHelper
     Kernel.system("tar", "-czf", bottle.to_s, "-C", dir.to_s, "foo/2.0", exception: true)
     bottle.realpath
   end
+
+  # Lets brew, loading a bottle file of `formula`, look up where `formula`
+  # would be (`Formulary.path`) when its loader is stubbed for its name.
+  sig { params(formula: Formula).void }
+  def stub_formula_path(formula)
+    allow(Formulary).to receive(:path).and_call_original
+    allow(Formulary).to receive(:path).with(formula.full_name).and_return(formula.path)
+  end
 end

@@ -1125,6 +1125,29 @@ RSpec.describe Timed::Command do
           .to eq([(dir/bottle).realpath.to_s, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"])
       end
     end
+
+    it "makes a bottle file absolute through its directory on disk, as brew loads it, keeping its name" do
+      dir = mktmpdir
+      (dir/"real/sub").mkpath
+      bottle = "foo--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"
+      (dir/"real"/bottle).write("")
+      FileUtils.ln_s dir/"real/sub", dir/"link"
+      Dir.chdir(dir) do
+        expect(described_class.named_argv(["link/../#{bottle}"])).to eq([(dir/"real").realpath.join(bottle).to_s])
+      end
+    end
+
+    it "makes a formula or cask file absolute as written, `..` dropping the directory before it, as brew loads it" do
+      dir = mktmpdir
+      (dir/"real/sub").mkpath
+      (dir/"foo.rb").write("")
+      (dir/"bar.json").write("")
+      FileUtils.ln_s dir/"real/sub", dir/"link"
+      Dir.chdir(dir) do
+        expect(described_class.named_argv(%w[link/../foo.rb link/../bar.json]))
+          .to eq([(dir/"foo.rb").realpath.to_s, (dir/"bar.json").realpath.to_s])
+      end
+    end
   end
 
   describe ".path_arguments" do
@@ -1157,6 +1180,24 @@ RSpec.describe Timed::Command do
         expect(described_class.path_arguments([bottle], { "foo" => foo }))
           .to eq("foo" => File.join(dir.realpath, bottle))
       end
+    end
+
+    it "stops on a formula loaded from a bottle file that is no longer there, rather than give its name" do
+      dir = mktmpdir
+      bottle = dir.realpath/"foo--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"
+      foo = formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-2.0.tgz"
+      end
+      foo.local_bottle_path = bottle
+      expect { described_class.path_arguments([bottle.to_s], { "foo" => foo }) }
+        .to raise_error(RuntimeError, <<~EOS.chomp)
+          The bottle file foo was loaded from can no longer be found:
+            #{bottle}
+          Nothing was installed, upgraded or reinstalled, as by name foo
+          may pour another bottle. Put the file back and run this command again,
+          or name foo instead of the file.
+        EOS
     end
   end
 

@@ -45,11 +45,13 @@ runs from the home directory, and so are bottle files. Where Homebrew loads
 packages from paths (with `$HOMEBREW_DEVELOPER` and without
 `$HOMEBREW_FORBID_PACKAGES_FROM_PATHS`), a formula given as a bottle file is
 upgraded from that file, as `brew upgrade` would; otherwise Homebrew's plan
-refuses it, as `brew upgrade` does. With no *`installed_formula`* named,
-it warns about any formula that `brew upgrade --dry-run` lists but the
-batches leave out, or the other way round (formulae given to `--exclude`
-count as planned, and a name that is also an installed cask's token is taken
-for the cask).
+refuses it, as `brew upgrade` does. If the file is gone once the run is
+confirmed, the command stops before upgrading anything, rather than upgrade
+the formula by name, which may pour another bottle. With no
+*`installed_formula`* named, it warns about any formula that
+`brew upgrade --dry-run` lists but the batches leave out, or the other way
+round (formulae given to `--exclude` count as planned, and a name that is also
+an installed cask's token is taken for the cask).
 `--interactive` can't be used, as it needs a terminal: use
 `brew upgrade --interactive` instead.
 

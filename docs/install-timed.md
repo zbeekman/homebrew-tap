@@ -107,8 +107,10 @@ they were, unless `--no-stamp-receipts` is given. Relative paths to formula
 files are passed on as absolute paths, as Homebrew runs from the home
 directory. A bottle file is loaded from that file, as `brew install` loads it
 (even with `$HOMEBREW_FORBID_PACKAGES_FROM_PATHS`), and passed on as its
-absolute path, so Homebrew installs that bottle, as `brew install` would.
-`--interactive` can't be used, as it needs a terminal: use
+absolute path, so Homebrew installs that bottle, as `brew install` would. If
+the file is gone once the run is confirmed, the command stops before
+installing anything, rather than install the formula by name, which may pour
+another bottle. `--interactive` can't be used, as it needs a terminal: use
 `brew install --interactive` instead. Casks are installed too, before or after
 the batches: see [Casks](#casks).
 

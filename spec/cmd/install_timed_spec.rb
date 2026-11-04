@@ -1035,6 +1035,30 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
         .to output(/^  brew install-timed #{Regexp.escape(bottle.to_s)}$/).to_stderr
     end
 
+    it "installs a formula named twice, as a bottle file and by name, as named first, as `brew install` does" do
+      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
+      stub_formula_path(stub_formula("foo"))
+      bottle = bottle_file
+      failing.push("foo", bottle.basename.to_s)
+      calls = [[bottle.to_s, "foo"], ["foo", bottle.to_s]].to_h do |names|
+        brew_calls.clear
+        run_command("--yes", *names)
+        [names, brew_calls.dup]
+      end
+      expect(calls).to eq([bottle.to_s, "foo"] => [["install", "--formula", "--yes", "--display-times", bottle.to_s]],
+                          ["foo", bottle.to_s] => [["install", "--formula", "--yes", "--display-times", "foo"]])
+    end
+
+    it "stops before running anything on a bottle file gone since it was loaded, rather than pour another bottle",
+       :aggregate_failures do
+      stub_cask("firefox", nil)
+      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
+      bottle = bottle_file
+      allow(Timed::Command).to receive(:show_plan) { bottle.delete }
+      expect { run_command("--yes", "firefox", bottle.to_s) }.to raise_error(RuntimeError, /can no longer be found/)
+      expect(brew_calls).to eq([])
+    end
+
     it "fails on a bottle file that doesn't exist before running anything", :aggregate_failures do
       allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       name = "nope--1.0.#{Utils::Bottles.tag}.bottle.tar.gz"

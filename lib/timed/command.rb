@@ -507,12 +507,20 @@ module Timed
 
     # Named arguments for the sub-calls, which run from another directory:
     # paths brew would load a formula (`.rb`, a bottle file) or cask (`.rb`,
-    # `.json`) from made absolute.
+    # `.json`) from made absolute, as brew resolves them: `.rb` and `.json`
+    # paths as written (`..` drops the directory before it), a bottle file
+    # through its directory on disk, keeping its name, as brew loads a bottle
+    # only from a file named like one.
     sig { params(names: T::Array[String]).returns(T::Array[String]) }
     def self.named_argv(names)
       names.map do |name|
-        path = name.end_with?(".rb", ".json") || HOMEBREW_BOTTLES_EXTNAME_REGEX.match?(name)
-        (path && File.exist?(name)) ? File.expand_path(name) : name
+        if HOMEBREW_BOTTLES_EXTNAME_REGEX.match?(name) && File.exist?(name)
+          File.join(File.realpath(File.dirname(name)), File.basename(name))
+        elsif name.end_with?(".rb", ".json") && File.exist?(File.expand_path(name))
+          File.expand_path(name)
+        else
+          name
+        end
       end
     end
 
@@ -522,13 +530,20 @@ module Timed
     # stored in its installed keg. A formula loaded from a bottle file is
     # matched by the file's real path (`local_bottle_path`) but given the
     # path as named, as brew loads a bottle only from a file named like one,
-    # which a symlink's target may not be.
+    # which a symlink's target may not be. If that file is gone, it raises:
+    # by name, a sub-call may pour another bottle.
     sig { params(names: T::Array[String], formulae: T::Hash[String, Formula]).returns(T::Hash[String, String]) }
     def self.path_arguments(names, formulae)
       paths = named_argv(names)
       formulae.filter_map do |name, formula|
         argument = if (bottle = formula.local_bottle_path)
-          paths.find { |path| File.exist?(path) && File.realpath(path) == bottle.to_s }
+          paths.find { |path| File.exist?(path) && File.realpath(path) == bottle.to_s } || raise(<<~EOS.chomp)
+            The bottle file #{name} was loaded from can no longer be found:
+              #{bottle}
+            Nothing was installed, upgraded or reinstalled, as by name #{name}
+            may pour another bottle. Put the file back and run this command again,
+            or name #{name} instead of the file.
+          EOS
         elsif paths.include?(formula.path.to_s)
           formula.path.to_s
         end
