@@ -34,8 +34,8 @@ module Homebrew
         Timed::Command.define_flags(self)
       end
 
-      sig { override.params(argv: T::Array[String]).void }
-      def initialize(argv = ARGV.freeze)
+      sig { override.params(argv: T::Array[String], formula: T.nilable(Formula)).void }
+      def initialize(argv = ARGV.freeze, formula: nil)
         super
         @argv = T.let(argv.dup, T::Array[String])
       end
