@@ -632,6 +632,24 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(builds.fetch("foo").last).to include("version" => "2.0", "status" => "built", "verb" => "upgrade")
     end
 
+    it "names a formula given as a bottle file to `brew upgrade` by that file, made absolute, where brew " \
+       "allows packages from paths, and leaves brew's preview to refuse it where brew does" do
+      keg = HOMEBREW_CELLAR/"foo/1.0"
+      (keg/"bin").mkpath
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
+      bottle = bottle_file
+      calls = [false, true].to_h do |forbid|
+        allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(forbid)
+        brew_calls.clear
+        Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) }
+        [forbid, brew_calls.dup]
+      end
+      preview_call = ["upgrade", "--dry-run", bottle.to_s]
+      expect(calls).to eq(false => [preview_call, ["upgrade", "--formula", "--yes", "--display-times", bottle.to_s]],
+                          true  => [preview_call])
+    end
+
     it "logs each upgrade and stamps its receipt", :aggregate_failures do
       stub_formula("cmake")
       run_command("--yes")

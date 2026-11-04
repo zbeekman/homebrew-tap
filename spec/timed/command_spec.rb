@@ -1115,6 +1115,16 @@ RSpec.describe Timed::Command do
           .to eq([(dir/"foo.rb").realpath.to_s, (dir/"bar.json").realpath.to_s, "missing.rb", "foo"])
       end
     end
+
+    it "makes bottle files absolute, as brew loads a formula from them too" do
+      dir = mktmpdir
+      bottle = "foo--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"
+      (dir/bottle).write("")
+      Dir.chdir(dir) do
+        expect(described_class.named_argv([bottle, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"]))
+          .to eq([(dir/bottle).realpath.to_s, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"])
+      end
+    end
   end
 
   describe ".path_arguments" do
@@ -1129,6 +1139,23 @@ RSpec.describe Timed::Command do
         foo = Formulary.factory("foo.rb")
         expect(described_class.path_arguments(%w[foo.rb bar], { "foo" => foo, "bar" => bar }))
           .to eq("foo" => (dir/"foo.rb").realpath.to_s)
+      end
+    end
+
+    it "gives a formula loaded from a bottle file that file as given, made absolute, even through a symlink " \
+       "whose target brew wouldn't load a bottle from" do
+      dir = mktmpdir
+      (dir/"download").write("")
+      bottle = "foo--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"
+      FileUtils.ln_s dir/"download", dir/bottle
+      foo = formula("foo") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/foo-2.0.tgz"
+      end
+      foo.local_bottle_path = (dir/"download").realpath
+      Dir.chdir(dir) do
+        expect(described_class.path_arguments([bottle], { "foo" => foo }))
+          .to eq("foo" => File.join(dir.realpath, bottle))
       end
     end
   end

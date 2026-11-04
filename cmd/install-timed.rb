@@ -73,9 +73,9 @@ module Homebrew
           EOS
         end
         # Brew loads every name before it installs anything, so an unknown one
-        # stops it. It doesn't pass brew's `method: :bottle`: the batches would
-        # install the formula by name, not the bottle file (see #63).
-        items = args.named.to_formulae_and_casks(warn: false)
+        # stops it. A bottle file is loaded from that file, as brew loads it,
+        # and its batch is given that file (see `arguments`).
+        items = args.named.to_formulae_and_casks(method: :bottle, warn: false)
         casks = items.grep(Cask::Cask)
         new_casks = casks.reject(&:installed?)
         # As `brew install` does, it upgrades the installed, outdated ones,
