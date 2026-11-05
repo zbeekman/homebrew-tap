@@ -78,7 +78,9 @@ module Homebrew
         end
         needs = dependencies(roots)
         deps = needs.transform_values { |dependencies| dependencies.map(&:full_name) }
-        formulae = needs.values.flatten.concat(roots).to_h { |formula| [formula.full_name, formula] }
+        # A formula named twice (e.g. by name and as a file) is upgraded as
+        # named first, as `brew upgrade` does.
+        formulae = (roots + needs.values.flatten).uniq(&:full_name).to_h { |formula| [formula.full_name, formula] }
         set = needs.keys
         estimates = Timed::Command.estimates(set.to_h { |name| [name, formulae.fetch(name)] },
                                              pour: ->(formula) { installer(formula).pour_bottle? },
@@ -155,19 +157,21 @@ module Homebrew
         # unasked.
         Homebrew::Ask.confirm?(action: "upgrade") if ask
 
+        # Before anything runs, as it stops on a bottle file that is gone.
+        arguments = Timed::Command.path_arguments(args.named, formulae)
         Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
                                 flags: cask_flags, label: "first")
         last = cask_plan.last.map(&:cask)
-        arguments = Timed::Command.path_arguments(args.named, formulae)
         # To finish them, the formulae given (all the outdated ones with no
         # names), not the outdated dependencies the batches add, each named as
-        # given: by the alias's new target, it wouldn't be upgraded.
+        # given (as first given, if twice, as `brew upgrade` keeps the first):
+        # by the alias's new target, it wouldn't be upgraded.
         given = roots.each_with_index.filter_map do |root, index|
           next unless planned.include?(root.full_name)
 
           formula = upgradeable.fetch(index)
           [root.full_name, arguments.fetch(formula.full_name, formula.full_name)]
-        end.to_h
+        end.uniq(&:first).to_h
         run = Timed::Command::Run.new(command: [self.class.command_name, *flags, *forwarded.own], roots: given,
                                       needs:   deps.slice(*given.keys))
         outcome = if result.batches.any?

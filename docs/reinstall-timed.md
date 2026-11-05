@@ -50,9 +50,13 @@ Once confirmed, it runs
 once, from the home directory, with the formula options it was given and the
 formulae in its order, which `brew reinstall` keeps. A formula given as a file
 is passed on as that file, made absolute, so Homebrew loads it from there and
-not by its name. With `--debug`, Homebrew's
-interactive debugger is turned off (`$HOMEBREW_DISABLE_DEBREW`), as its prompt
-couldn't be answered.
+not by its name. So is a bottle file, where Homebrew loads packages from paths
+(with `$HOMEBREW_DEVELOPER`, unless `$HOMEBREW_FORBID_PACKAGES_FROM_PATHS` is
+set), so Homebrew reinstalls from that bottle, as `brew reinstall` would. If
+the file is gone once the run is confirmed, the command stops before
+reinstalling anything, rather than reinstall the formula by name, which may
+pour another bottle. With `--debug`, Homebrew's interactive debugger is turned
+off (`$HOMEBREW_DISABLE_DEBREW`), as its prompt couldn't be answered.
 
 The call runs without Homebrew's installed-dependents check
 (`$HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK`), and without any of Homebrew's

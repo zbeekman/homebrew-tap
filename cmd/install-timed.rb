@@ -73,9 +73,9 @@ module Homebrew
           EOS
         end
         # Brew loads every name before it installs anything, so an unknown one
-        # stops it. It doesn't pass brew's `method: :bottle`: the batches would
-        # install the formula by name, not the bottle file (see #63).
-        items = args.named.to_formulae_and_casks(warn: false)
+        # stops it. A bottle file is loaded from that file, as brew loads it,
+        # and its batch is given that file (see `arguments`).
+        items = args.named.to_formulae_and_casks(method: :bottle, warn: false)
         casks = items.grep(Cask::Cask)
         new_casks = casks.reject(&:installed?)
         # As `brew install` does, it upgrades the installed, outdated ones,
@@ -173,7 +173,9 @@ module Homebrew
         # `FormulaInstaller#prelude`, without its downloads. Brew works out the
         # dependencies it prints and asks about before it reads the bottle
         # manifests, and those it installs after, so they are checked
-        # (`verify_deps_exist`, which keeps them) first.
+        # (`verify_deps_exist`, which keeps them) first. A formula named twice
+        # (e.g. by name and as a file) is installed as named first, as brew
+        # skips the second (`check_installation_already_attempted`).
         installers = Install.select_formula_installers(installers, action: lambda do |installer|
           installer.verify_deps_exist unless installer.ignore_deps?
           installer.determine_bottle_tab_attributes
@@ -181,7 +183,8 @@ module Homebrew
           installer.forbidden_tap_check
           installer.forbidden_formula_check
           installer.check_install_sanity
-        end).to_h { |installer| [installer.formula.full_name, installer] }
+        end).uniq { |installer| installer.formula.full_name }
+            .to_h { |installer| [installer.formula.full_name, installer] }
         # The dependencies brew would install or upgrade in the calls of the
         # named formulae get batches of their own. None with
         # `--ignore-dependencies` or `--only-dependencies`, nor with
@@ -294,9 +297,10 @@ module Homebrew
         # Each batch's `brew install` notes the support tier of the run and
         # says it as it exits, so this command doesn't say it again.
         Homebrew::Diagnostic.support_tiers.clear
+        # Before anything runs, as it stops on a bottle file that is gone.
+        arguments = Timed::Command.path_arguments(args.named, formulae)
         Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, first_casks),
                                 flags: forwarded.cask, label: "first")
-        arguments = Timed::Command.path_arguments(args.named, formulae)
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
                                       roots:   planned_installers.to_h do |installer|
                                         name = installer.formula.full_name

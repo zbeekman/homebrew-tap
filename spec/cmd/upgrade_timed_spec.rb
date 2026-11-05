@@ -632,6 +632,53 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(builds.fetch("foo").last).to include("version" => "2.0", "status" => "built", "verb" => "upgrade")
     end
 
+    it "names a formula given as a bottle file to `brew upgrade` by that file, made absolute, where brew " \
+       "allows packages from paths, and leaves brew's preview to refuse it where brew does" do
+      keg = HOMEBREW_CELLAR/"foo/1.0"
+      (keg/"bin").mkpath
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
+      bottle = bottle_file
+      calls = [false, true].to_h do |forbid|
+        allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(forbid)
+        brew_calls.clear
+        Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) }
+        [forbid, brew_calls.dup]
+      end
+      preview_call = ["upgrade", "--dry-run", bottle.to_s]
+      expect(calls).to eq(false => [preview_call, ["upgrade", "--formula", "--yes", "--display-times", bottle.to_s]],
+                          true  => [preview_call])
+    end
+
+    it "stops after brew's preview on a bottle file gone since it was loaded, rather than pour another bottle",
+       :aggregate_failures do
+      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
+      keg = HOMEBREW_CELLAR/"foo/1.0"
+      (keg/"bin").mkpath
+      (HOMEBREW_PREFIX/"opt").mkpath
+      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
+      stub_cask("firefox")
+      bottle = bottle_file
+      allow(Timed::Command).to receive(:show_plan) { bottle.delete }
+      expect { run_command("--yes", "firefox", bottle.to_s) }.to raise_error(RuntimeError, /can no longer be found/)
+      expect(brew_calls).to eq([["upgrade", "--dry-run", "firefox", bottle.to_s]])
+    end
+
+    it "upgrades a formula named twice, as a bottle file and by name, as named first, as `brew upgrade` does" do
+      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
+      stub_formula_path(stub_formula("foo"))
+      bottle = bottle_file
+      # The run naming foo first goes last: its call installs foo 2.0, which
+      # a call given the bottle file doesn't.
+      calls = [[bottle.to_s, "foo"], ["foo", bottle.to_s]].to_h do |names|
+        brew_calls.clear
+        run_command("--yes", *names)
+        [names, brew_calls.drop(1)]
+      end
+      expect(calls).to eq([bottle.to_s, "foo"] => [["upgrade", "--formula", "--yes", "--display-times", bottle.to_s]],
+                          ["foo", bottle.to_s] => [["upgrade", "--formula", "--yes", "--display-times", "foo"]])
+    end
+
     it "logs each upgrade and stamps its receipt", :aggregate_failures do
       stub_formula("cmake")
       run_command("--yes")
@@ -899,6 +946,17 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect { run_command("--yes", "--exclude=lib", "old", "iterm2") }
         .to raise_error(Interrupt)
         .and output(/^Finish those first with `brew upgrade-timed --exclude=lib old`, /).to_stderr
+    end
+
+    it "names a formula given twice, through an alias and as its new target, as given first, to finish what a " \
+       "last cask needs first, as `brew upgrade` keeps the first" do
+      target = stub_formula("cmake")
+      allow(stub_formula("old")).to receive(:latest_formula).and_return(target)
+      stub_cask("iterm2", stanzas: 'depends_on formula: "cmake"')
+      allow(Timed::Runner).to receive(:run).and_raise(Interrupt)
+      expect { run_command("--yes", "old", "cmake", "iterm2") }
+        .to raise_error(Interrupt)
+        .and output(/^Finish those first with `brew upgrade-timed old`, /).to_stderr
     end
 
     it "reports a failed first cask call and still runs the batches and the last call", :aggregate_failures do
