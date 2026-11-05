@@ -33,6 +33,24 @@ RSpec.describe Timed::Plot do
     end
   end
 
+  describe ".quartile_legend" do
+    let(:paint) { ->(text, style) { "<#{style}:#{text}>" } }
+
+    it "paints the range of each quartile in its colour, from the quartiles of the values" do
+      expect(described_class.quartile_legend([10.0, 40.0, 200.0, 1000.0], paint:))
+        .to eq("Quartiles: <blue:≤ 0m32s>  <green:≤ 2m00s>  <yellow:≤ 6m40s>  <red:> 6m40s>")
+    end
+
+    it "repeats equal cuts, a time on a cut being in the lower quartile" do
+      expect(described_class.quartile_legend([10.0, 10.0, 10.0, 10.0, 500.0], paint:))
+        .to eq("Quartiles: <blue:≤ 0m10s>  <green:≤ 0m10s>  <yellow:≤ 0m10s>  <red:> 0m10s>")
+    end
+
+    it "is nil for fewer than 4 values, which use the fixed bands" do
+      expect(described_class.quartile_legend([10.0, 40.0, 200.0], paint:)).to be_nil
+    end
+  end
+
   describe ".band with cuts" do
     let(:cuts) { [10.0, 20.0, 30.0] }
 

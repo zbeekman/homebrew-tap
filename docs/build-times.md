@@ -102,8 +102,8 @@ stay together, ordered by its first row.
 - `--quartiles`: with colour, paint `estimate` and the blocks of the trend by
   the quartile of the estimates of the rows listed (those of the formulae
   named, if any), instead of the fixed bands: the first quartile blue, the
-  second green, the third yellow and the fourth red. See
-  [Quartiles](#quartiles).
+  second green, the third yellow and the fourth red, and print a legend of
+  their ranges. See [Quartiles](#quartiles).
 - `--json`\[=*`version`*\]: print the build history as JSON instead of the
   tables, as `brew tap-info --json` does. `v1` is the default and the only
   accepted *`version`*; any other is a usage error. See [JSON](#json).
@@ -249,8 +249,8 @@ There is no `--json`; `stats --json` gives every time plotted.
 - `--quartiles`: with colour, paint each bar by the quartile of its median
   among the times plotted (one mean for each formula, or every build with
   `--builds`), instead of the fixed bands: the first quartile blue, the
-  second green, the third yellow and the fourth red. See
-  [Quartiles](#quartiles).
+  second green, the third yellow and the fourth red, and print a legend of
+  their ranges (not with `--smooth`). See [Quartiles](#quartiles).
 
 ```console
 $ brew build-times histogram
@@ -516,6 +516,13 @@ blue, the second green, the third yellow and the fourth red.
   them, and the blocks of the trend use the same cut points. In `histogram`
   they are those of the times plotted, and each bar takes the quartile of the
   median of its times.
+- With colour, a line after the table (`stats`) or the plot (`histogram`)
+  gives the range of each quartile in its own colour, from the cut points
+  and in the form of the other times, such as
+  `Quartiles: ≤ 1m12s  ≤ 4m30s  ≤ 18m02s  > 18m02s`. There is none without
+  colour, where the colours are not shown, with fewer than 4 times, where the
+  fixed bands are used, with `histogram --smooth`, whose curve is never
+  coloured, or in `--json`.
 - A time on a cut point is in the lower quartile, so when many times are
   equal the higher colours may not appear: with times of 10 s, 10 s, 10 s,
   10 s and 500 s, only 500 s is red and the rest blue.
