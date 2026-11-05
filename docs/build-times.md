@@ -519,10 +519,10 @@ blue, the second green, the third yellow and the fourth red.
 - With colour, a line after the table (`stats`) or the plot (`histogram`)
   gives the range of each quartile in its own colour, from the cut points
   and in the form of the other times, such as
-  `Quartiles: ≤ 1m12s  ≤ 4m30s  ≤ 18m02s  > 18m02s`. There is none without
-  colour, where the colours are not shown, with fewer than 4 times, where the
-  fixed bands are used, with `histogram --smooth`, whose curve is never
-  coloured, or in `--json`.
+  `Quartiles: ≤ 1m12s  1m12s–4m30s  4m30s–18m02s  > 18m02s`. There is none
+  without colour, where the colours are not shown, with fewer than 4 times,
+  where the fixed bands are used, with `histogram --smooth`, whose curve is
+  never coloured, or in `--json`.
 - A time on a cut point is in the lower quartile, so when many times are
   equal the higher colours may not appear: with times of 10 s, 10 s, 10 s,
   10 s and 500 s, only 500 s is red and the rest blue.

@@ -52,15 +52,17 @@ module Timed
     end
 
     # The key to the colours of `--quartiles`: the range of each quartile of
-    # `values`, painted in its colour; nil for fewer than 4 values, which use
-    # the fixed bands. The times are as `BuildLog.format_duration` shows them.
+    # `values` (the middle ones from one cut to the next), painted in its
+    # colour; nil for fewer than 4 values, which use the fixed bands. The
+    # times are as `BuildLog.format_duration` shows them.
     sig { params(values: T::Array[Float], paint: Paint).returns(T.nilable(String)) }
     def self.quartile_legend(values, paint:)
       cuts = quartile_cuts(values)
       return unless cuts
 
       times = cuts.map { |cut| BuildLog.format_duration(cut) }
-      ranges = times.map { |time| "≤ #{time}" } + ["> #{times.last}"]
+      ranges = ["≤ #{times.fetch(0)}", "#{times.fetch(0)}–#{times.fetch(1)}", "#{times.fetch(1)}–#{times.fetch(2)}",
+                "> #{times.fetch(2)}"]
       painted = QUARTILE_STYLES.each_with_index.map { |style, index| paint.call(ranges.fetch(index), style) }
       "Quartiles: #{painted.join("  ")}"
     end

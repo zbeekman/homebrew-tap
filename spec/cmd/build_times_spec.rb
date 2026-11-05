@@ -222,7 +222,7 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
         it "prints a legend of the quartiles after the table, each range in its colour" do
           output = capture_stdout { described_class.new(%w[stats --quartiles]).run }
           expect(output.lines.fetch(7)).to eq(
-            "Quartiles: \e[34m≤ 0m07s\e[0m  \e[32m≤ 0m43s\e[0m  \e[33m≤ 2m53s\e[0m  \e[31m> 2m53s\e[0m\n",
+            "Quartiles: \e[34m≤ 0m07s\e[0m  \e[32m0m07s–0m43s\e[0m  \e[33m0m43s–2m53s\e[0m  \e[31m> 2m53s\e[0m\n",
           )
         end
 
@@ -541,7 +541,7 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     it "ends with a legend of the quartiles of the times plotted, each range in its colour" do
       ENV["HOMEBREW_COLOR"] = "1"
       expect(histogram("--builds", "--quartiles").lines.last).to eq(
-        "Quartiles: \e[34m≤ 3m10s\e[0m  \e[32m≤ 3m11s\e[0m  \e[33m≤ 3m25s\e[0m  \e[31m> 3m25s\e[0m\n",
+        "Quartiles: \e[34m≤ 3m10s\e[0m  \e[32m3m10s–3m11s\e[0m  \e[33m3m11s–3m25s\e[0m  \e[31m> 3m25s\e[0m\n",
       )
     end
 
