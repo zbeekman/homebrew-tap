@@ -219,12 +219,30 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
           expect(painted("--quartiles", "awscli", "llvm")).to eq(painted("awscli", "llvm"))
         end
 
+        it "prints a legend of the quartiles after the table, each range in its colour" do
+          output = capture_stdout { described_class.new(%w[stats --quartiles]).run }
+          expect(output.lines.fetch(7)).to eq(
+            "Quartiles: \e[34m≤ 0m07s\e[0m  \e[32m0m07s–0m43s\e[0m  \e[33m0m43s–2m53s\e[0m  \e[31m> 2m53s\e[0m\n",
+          )
+        end
+
+        it "prints no legend without colour" do
+          ENV.delete("HOMEBREW_COLOR")
+          expect(capture_stdout { described_class.new(%w[stats --quartiles]).run }).not_to include("Quartiles:")
+        end
+
+        it "prints no legend without `--quartiles`, with fewer than 4 rows, or in `--json`" do
+          outputs = [%w[stats], %w[stats --quartiles awscli llvm], %w[stats --quartiles --json]]
+                    .map { |args| capture_stdout { described_class.new(args).run } }
+          expect(outputs.map { |output| output.include?("Quartiles:") }).to eq([false] * 3)
+        end
+
         it "keeps the kind, a failed last, the header and the LLM estimates table as without it" do
           estimates = { "llvm" => { "version" => "23.1.2", "seconds" => 20.0, "model" => "m",
                                     "date" => "2026-09-20" } }
           database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
           kept = [[], %w[--quartiles]].map do |args|
-            lines = capture_stdout { described_class.new(["stats", *args]).run }.lines
+            lines = capture_stdout { described_class.new(["stats", *args]).run }.lines.grep_v(/\AQuartiles:/)
             [lines.fetch(0), lines.map { |line| line[/\e\[3[56]m(?:built|poured)\e\[0m/] },
              lines.fetch(6)[/\e\[31m1\.25\.1 failed 2026-09-27\e\[0m/], *lines.last(2)]
           end
@@ -520,15 +538,30 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
       expect(histogram("--quartiles")).to eq(histogram)
     end
 
+    it "ends with a legend of the quartiles of the times plotted, each range in its colour" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      expect(histogram("--builds", "--quartiles").lines.last).to eq(
+        "Quartiles: \e[34m≤ 3m10s\e[0m  \e[32m3m10s–3m11s\e[0m  \e[33m3m11s–3m25s\e[0m  \e[31m> 3m25s\e[0m\n",
+      )
+    end
+
+    it "prints no legend without `--quartiles`, with fewer than 4 values, or with `--smooth`, never painted" do
+      ENV["HOMEBREW_COLOR"] = "1"
+      outputs = [histogram("--builds"), histogram("--quartiles"), histogram("--smooth", "--builds", "--quartiles")]
+      expect(outputs.map { |output| output.include?("Quartiles:") }).to eq([false] * 3)
+    end
+
     it "paints with blue, which the fixed bands never do" do
       ENV["HOMEBREW_COLOR"] = "1"
       expect(histogram("--builds", "--quartiles").scan(/\e\[(\d+)m█/).flatten.uniq.sort).to eq(%w[31 33 34])
     end
 
-    it "works with `--poured`, `--linear` and `--smooth`" do
+    it "works with `--poured`, `--linear` and `--smooth`, which has no legend" do
       ENV["HOMEBREW_COLOR"] = "1"
-      outputs = [%w[--poured --builds], %w[--linear --builds], %w[--smooth --builds]]
-                .to_h { |args| [args, Tty.strip_ansi(histogram(*args, "--quartiles"))] }
+      legend = /^Quartiles:.*\n/
+      outputs = [%w[--poured --builds], %w[--linear --builds]]
+                .to_h { |args| [args, Tty.strip_ansi(histogram(*args, "--quartiles")).sub(legend, "")] }
+      outputs[%w[--smooth --builds]] = Tty.strip_ansi(histogram("--smooth", "--builds", "--quartiles"))
       expect(outputs).to eq(outputs.keys.to_h { |args| [args, Tty.strip_ansi(histogram(*args))] })
     end
   end

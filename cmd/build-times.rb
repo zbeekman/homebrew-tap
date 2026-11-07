@@ -126,7 +126,8 @@ module Homebrew
             labelled `75s batch split`, marks 75 seconds, where the `-timed` commands start to split batches.
             With colour, each bar is green up to 75 seconds, yellow up to 10 minutes and red above, by the median of
             its times. With `--quartiles`, the colours follow the quartiles of the times plotted instead: first blue,
-            second green, third yellow, fourth red. It needs at least 2 times to plot.
+            second green, third yellow, fourth red, and a last line gives the range of each (not with `--smooth`).
+            It needs at least 2 times to plot.
           EOS
           switch "--poured",
                  description: "Plot the times of pours instead of source builds."
@@ -156,10 +157,15 @@ module Homebrew
           end
 
           title = args.builds? ? "Time of #{counted}" : "Mean #{what} time of #{counted}"
+          # The curve of `--smooth` is never painted, so there is nothing to key.
+          legend = if args.quartiles? && !args.smooth? && Tty.color?
+            Timed::Plot.quartile_legend(values, paint: Timed::Columns::PAINT)
+          end
           ohai "#{title}, from #{Timed::BuildLog.format_duration(values.min)} to " \
                "#{Timed::BuildLog.format_duration(values.max)}",
                *Timed::Plot.histogram(values, width: Tty.width, smooth: args.smooth?, linear: args.linear?,
-                                                paint: Timed::Columns::PAINT, quartiles: args.quartiles?)
+                                                paint: Timed::Columns::PAINT, quartiles: args.quartiles?),
+               *legend
         end
       end
 
@@ -177,7 +183,8 @@ module Homebrew
             A failed build is shown as `×` in the trend of every row of the formula.
             With colour, the column names of the header are bold and underlined.
             With `--quartiles`, the estimates and the trend are coloured by the quartile of the estimates of the rows
-            listed instead of the fixed bands: first blue, second green, third yellow, fourth red.
+            listed instead of the fixed bands: first blue, second green, third yellow, fourth red, and a line after
+            the table gives the range of each.
             Colour follows Homebrew's own rules (off when not a terminal or with `HOMEBREW_NO_COLOR`).
             With `--json`, print a JSON array instead, never coloured: for each row `name`, `kind`, `n`, `median`,
             `mean` and `stdev` (seconds) and its `builds`, each with `seconds`, `date`, `version` and `status`.
@@ -213,6 +220,10 @@ module Homebrew
           return puts JSON.pretty_generate(Timed::StatsTable.json_rows(log, rows)) if json
 
           Timed::StatsTable.lines(rows, quartiles: args.quartiles?).each { |line| puts line }
+          if args.quartiles? && Tty.color?
+            legend = Timed::Plot.quartile_legend(rows.map(&:estimate), paint: Timed::Columns::PAINT)
+            puts legend if legend
+          end
           puts "fallback for unknown formulae (median of per-package means): " \
                "#{Timed::BuildLog.format_duration(log.fallback_estimate)}"
           estimates = args.named.empty? ? log.estimates.sort.to_h : log.estimates.slice(*names)
