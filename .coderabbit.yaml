@@ -1,0 +1,6 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  auto_review:
+    # Review each PR once when opened; later reviews are requested with
+    # `@coderabbitai review`, so one bot reviews at a time.
+    auto_incremental_review: false
