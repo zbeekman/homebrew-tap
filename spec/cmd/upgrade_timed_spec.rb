@@ -59,7 +59,7 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
   # line; a cask call succeeds. There is a terminal for sudo.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
-    allow(Cask::CaskLoader).to receive(:for).and_call_original
+    allow(Cask::CaskLoader).to receive(:loader_for).and_call_original
     allow(Formula).to receive(:installed) { installed }
     allow(Timed::Command).to receive(:auto_update)
     allow(Timed::Command).to receive(:brew) do |_env, argv|
@@ -616,67 +616,6 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       run_command("--yes", "--verbose", "--minimum-version=1.5", "--greedy", "cmake")
       expect(brew_calls).to eq([%w[upgrade --dry-run --verbose --minimum-version=1.5 --greedy cmake],
                                 %w[upgrade --formula --yes --display-times --verbose cmake]])
-    end
-
-    it "names a formula given as a file to `brew upgrade` by that file, made absolute, and logs it by name",
-       :aggregate_failures do
-      dir = mktmpdir
-      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
-      keg = HOMEBREW_CELLAR/"foo/1.0"
-      (keg/"bin").mkpath
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
-      expect(brew_calls.last).to eq(["upgrade", "--formula", "--yes", "--display-times",
-                                     (dir/"foo.rb").realpath.to_s])
-      expect(builds.fetch("foo").last).to include("version" => "2.0", "status" => "built", "verb" => "upgrade")
-    end
-
-    it "names a formula given as a bottle file to `brew upgrade` by that file, made absolute, where brew " \
-       "allows packages from paths, and leaves brew's preview to refuse it where brew does" do
-      keg = HOMEBREW_CELLAR/"foo/1.0"
-      (keg/"bin").mkpath
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      bottle = bottle_file
-      calls = [false, true].to_h do |forbid|
-        allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(forbid)
-        brew_calls.clear
-        Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) }
-        [forbid, brew_calls.dup]
-      end
-      preview_call = ["upgrade", "--dry-run", bottle.to_s]
-      expect(calls).to eq(false => [preview_call, ["upgrade", "--formula", "--yes", "--display-times", bottle.to_s]],
-                          true  => [preview_call])
-    end
-
-    it "stops after brew's preview on a bottle file gone since it was loaded, rather than pour another bottle",
-       :aggregate_failures do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
-      keg = HOMEBREW_CELLAR/"foo/1.0"
-      (keg/"bin").mkpath
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      stub_cask("firefox")
-      bottle = bottle_file
-      allow(Timed::Command).to receive(:show_plan) { bottle.delete }
-      expect { run_command("--yes", "firefox", bottle.to_s) }.to raise_error(RuntimeError, /can no longer be found/)
-      expect(brew_calls).to eq([["upgrade", "--dry-run", "firefox", bottle.to_s]])
-    end
-
-    it "upgrades a formula named twice, as a bottle file and by name, as named first, as `brew upgrade` does" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
-      stub_formula_path(stub_formula("foo"))
-      bottle = bottle_file
-      # The run naming foo first goes last: its call installs foo 2.0, which
-      # a call given the bottle file doesn't.
-      calls = [[bottle.to_s, "foo"], ["foo", bottle.to_s]].to_h do |names|
-        brew_calls.clear
-        run_command("--yes", *names)
-        [names, brew_calls.drop(1)]
-      end
-      expect(calls).to eq([bottle.to_s, "foo"] => [["upgrade", "--formula", "--yes", "--display-times", bottle.to_s]],
-                          ["foo", bottle.to_s] => [["upgrade", "--formula", "--yes", "--display-times", "foo"]])
     end
 
     it "logs each upgrade and stamps its receipt", :aggregate_failures do

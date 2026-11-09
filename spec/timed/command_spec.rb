@@ -135,7 +135,7 @@ RSpec.describe Timed::Command do
     # Brew asks the server for a download's file name and, as when it can't
     # reach it, here takes it from the URL.
     before do
-      allow(Cask::CaskLoader).to receive(:for).and_call_original
+      allow(Cask::CaskLoader).to receive(:loader_for).and_call_original
       allow_any_instance_of(CurlDownloadStrategy).to receive(:curl_headers)
         .and_raise(ErrorDuringExecution.new(%w[curl], status: 6))
     end
@@ -289,7 +289,7 @@ RSpec.describe Timed::Command do
         (dir/"foo.rb").write(cask_source("foo", "2.0"))
         Dir.chdir(dir) do
           reasons = [Timed::Casks::Reason.new(kind: :sudo, message: "`pkg` requires sudo")]
-          skipped = [Timed::Casks::Entry.new(cask: Cask::CaskLoader.load("foo.rb"), reasons:)]
+          skipped = [Timed::Casks::Entry.new(cask: Cask::CaskLoader.from_path("foo.rb"), reasons:)]
           plan = Timed::Casks::Plan.new(first: [], last: [], skipped:)
           path = Regexp.escape((dir/"foo.rb").realpath.to_s)
           expect { described_class.show_casks("install", plan, named: %w[foo.rb], flags: []) }
@@ -684,7 +684,7 @@ RSpec.describe Timed::Command do
         dir.mkpath
         (dir/"foo.rb").write(cask_source("foo", "2.0"))
         Dir.chdir(dir) do
-          casks = [Cask::CaskLoader.load("foo.rb")]
+          casks = [Cask::CaskLoader.from_path("foo.rb")]
           command = described_class.later("install", casks, named: %w[foo.rb], flags: ["--appdir=/My Apps"])
           expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps " \
                                 "#{(dir/"foo.rb").realpath.to_s.gsub(" ", "\\ ")}`.")
@@ -783,7 +783,7 @@ RSpec.describe Timed::Command do
         (dir/"foo.rb").write(cask_source("foo", "2.0"))
         bar = Cask::Cask.new("bar", tap: Tap.fetch("user", "tap"))
         Dir.chdir(dir) do
-          foo = Cask::CaskLoader.load("foo.rb")
+          foo = Cask::CaskLoader.from_path("foo.rb")
           expect(described_class.cask_arguments(%w[foo.rb user/tap/bar], [foo, bar]))
             .to eq([(dir/"foo.rb").realpath.to_s, "user/tap/bar"])
         end
@@ -1159,7 +1159,7 @@ RSpec.describe Timed::Command do
         url "https://brew.sh/bar-1.0.tgz"
       end
       Dir.chdir(dir) do
-        foo = Formulary.factory("foo.rb")
+        foo = Formulary.from_path("foo.rb")
         expect(described_class.path_arguments(%w[foo.rb bar], { "foo" => foo, "bar" => bar }))
           .to eq("foo" => (dir/"foo.rb").realpath.to_s)
       end

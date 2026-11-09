@@ -67,7 +67,7 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
   # for sudo, and no dependent has broken linkage.
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
-    allow(Cask::CaskLoader).to receive(:for).and_call_original
+    allow(Cask::CaskLoader).to receive(:loader_for).and_call_original
     allow(Timed::Command).to receive(:brew) do |_env, argv|
       brew_calls << argv
       true
@@ -400,69 +400,6 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
                   "gcc", "llvm", "cmake")
       flags = %w[--debug --force --verbose --build-from-source --keep-tmp --debug-symbols --git]
       expect(brew_calls).to eq([["reinstall", "--formula", "--yes", "--display-times", *flags, "cmake", "gcc"]])
-    end
-
-    it "names a formula given as a file to `brew reinstall` by that file, made absolute, and logs it by name",
-       :aggregate_failures do
-      dir = mktmpdir
-      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
-      keg = HOMEBREW_CELLAR/"foo/2.0"
-      keg.mkpath
-      FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
-      expect(brew_calls.last.last).to eq((dir/"foo.rb").realpath.to_s)
-      expect(builds.fetch("foo").last).to include("status" => "built", "verb" => "reinstall")
-    end
-
-    it "names a formula given as a bottle file to `brew reinstall` by that file, made absolute, where brew " \
-       "allows packages from paths, and refuses it where brew does" do
-      keg = HOMEBREW_CELLAR/"foo/2.0"
-      keg.mkpath
-      FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      bottle = bottle_file
-      failing << bottle.basename.to_s
-      calls = [false, true].to_h do |forbid|
-        allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(forbid)
-        brew_calls.clear
-        Dir.chdir(bottle.dirname) { run_to_end("--yes", bottle.basename.to_s) }
-        [forbid, brew_calls.dup]
-      end
-      expect(calls).to eq(false => [["reinstall", "--formula", "--yes", "--display-times", bottle.to_s]],
-                          true  => [])
-    end
-
-    it "stops before running anything on a bottle file gone since it was loaded, rather than pour another bottle",
-       :aggregate_failures do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
-      keg = HOMEBREW_CELLAR/"foo/2.0"
-      keg.mkpath
-      FileUtils.cp receipt, keg/"INSTALL_RECEIPT.json"
-      (HOMEBREW_PREFIX/"opt").mkpath
-      FileUtils.ln_s keg, HOMEBREW_PREFIX/"opt/foo"
-      stub_cask("firefox", "2.0")
-      bottle = bottle_file
-      allow(Timed::Command).to receive(:show_plan) { bottle.delete }
-      expect { run_command("--yes", "firefox", bottle.to_s) }.to raise_error(RuntimeError, /can no longer be found/)
-      expect(brew_calls).to eq([])
-    end
-
-    it "reinstalls a formula named twice, as a bottle file and by name, as named first, as `brew reinstall` does" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
-      stub_formula_path(stub_formula("foo"))
-      bottle = bottle_file
-      failing.push("foo", bottle.basename.to_s)
-      calls = [[bottle.to_s, "foo"], ["foo", bottle.to_s]].to_h do |names|
-        brew_calls.clear
-        run_to_end("--yes", *names)
-        [names, brew_calls.dup]
-      end
-      expect(calls).to eq([bottle.to_s, "foo"] => [["reinstall", "--formula", "--yes", "--display-times",
-                                                    bottle.to_s]],
-                          ["foo", bottle.to_s] => [["reinstall", "--formula", "--yes", "--display-times", "foo"]])
     end
 
     it "logs each reinstall and stamps its receipt", :aggregate_failures do

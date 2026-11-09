@@ -317,7 +317,7 @@ RSpec.describe "brew internals", type: :system do
     end
 
     it "uninstalls the installed cask without a successor, with its `zap` stanzas" do
-      body = brew_source("cask/installer.rb")[/^    def zap\n.*?^    end$/m]
+      body = brew_source("cask/installer.rb")[/^    def zap\(dry_run: false\)\n.*?^    end$/m]
       expect(body.lines.map(&:strip).grep(/uninstall_artifacts|zap_phase|load_installed_caskfile|zap_stanzas =/))
         .to eq(["load_installed_caskfile!", "zap_stanzas = @cask.artifacts.grep(Artifact::Zap)",
                 "uninstall_artifacts(clear: true, zap_stanzas:)"])
@@ -455,7 +455,7 @@ RSpec.describe "brew internals", type: :system do
                "!Homebrew::Trust.trusted?(:cask, \"\#{tap.name}/\#{@cask.token}\")"]
       lines = body.lines.map(&:strip)
       untrusted = body[/trusted\?.*?^\s+return$/m]
-      zap = brew_source("cask/installer.rb")[/^    def zap\n.*?^    end$/m].to_s
+      zap = brew_source("cask/installer.rb")[/^    def zap\(dry_run: false\)\n.*?^    end$/m].to_s
       expect([guard.map { |line| lines.index(line) }.then { |at| at.all? && at == at.sort },
               untrusted&.exclude?("@cask ="), zap.include?("@cask.artifacts.grep(Artifact::Zap)")])
         .to eq([true, true, true])
@@ -801,7 +801,8 @@ RSpec.describe "brew internals", type: :system do
       options = call.to_s.split(",").map { |option| option.strip.squeeze(" ") }.reject(&:empty?)
       expect(options).to eq(["f", "head: args.HEAD?", "fetch_head: args.fetch_HEAD?",
                              "only_dependencies: args.only_dependencies?", "force: args.force?",
-                             "quiet: args.quiet?", "skip_link: args.skip_link?", "overwrite: args.overwrite?"])
+                             "quiet: args.quiet?", "skip_link: args.skip_link?", "overwrite: args.overwrite?",
+                             "installed_on_request:"])
     end
 
     it "installs a missing formula, marks an installed one as installed on request, dropping keys brew doesn't " \
@@ -952,7 +953,7 @@ RSpec.describe "brew internals", type: :system do
       call = body[/fi = FormulaInstaller\.new\(\n\s+dep_formula,\n(.*?)\n\s+\)\n/m, 1].to_s
       keywords = call.lines.map { |line| line.strip.delete_suffix(",").squeeze(" ") }
       expect([options.all? { |line| body.include?(line) }, keywords])
-        .to eq([true, ["options:", "link_keg: keg_had_linked_keg && keg_was_linked", "installed_on_request:",
+        .to eq([true, ["options:", "link_keg: keg_was_linked || nil", "installed_on_request:",
                        "force_bottle: false", "include_test_formulae: @include_test_formulae",
                        "build_from_source_formulae: @build_from_source_formulae", "keep_tmp: keep_tmp?",
                        "debug_symbols: debug_symbols?", "force: force?", "debug: debug?", "quiet: quiet?",
@@ -977,10 +978,10 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`brew upgrade`'s installer for a formula" do
-    it "keeps whether the keg linked into `opt` was installed on request, and builds a bottle again if it was " \
-       "built as one, but takes one without such a keg as installed on request" do
+    it "keeps whether the keg linked into `opt` was linked and installed on request, and builds a bottle again " \
+       "if it was built as one, but takes one without such a keg as installed on request" do
       body = brew_source("upgrade.rb")[/^      def create_formula_installer\(.*?^      end$/m].to_s
-      lines = ["keg = if formula.optlinked?", "if keg", "tab = keg.tab",
+      lines = ["keg = if formula.optlinked?", "if keg", "tab = keg.tab", "link_keg = keg.linked?",
                "installed_on_request = tab.installed_on_request == true", "build_bottle = tab.built_bottle?",
                "else", "link_keg = nil", "installed_on_request = true"]
       expect(lines.reject { |line| body.include?(line) }).to eq([])
@@ -1014,7 +1015,7 @@ RSpec.describe "brew internals", type: :system do
     # The keywords given to the call that starts with `call` in `source`, up
     # to the end of the line that closes it.
     def keywords(source, call)
-      source[/#{Regexp.escape(call)}(.*?)\)\n/m, 1].to_s.scan(/\b(\w+):\s/).flatten
+      source[/#{Regexp.escape(call)}(.*?)\)\n/m, 1].to_s.scan(/\b(\w+):[\s,]/).flatten
     end
 
     it "gives its installers, dependents check and plan the options `brew install-timed` gives them" do

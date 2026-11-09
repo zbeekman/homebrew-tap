@@ -39,15 +39,7 @@ asking, as `brew upgrade` does.
 
 Formulae it won't upgrade (up to date, not installed, pinned, unknown or
 needing a newer version of a pinned dependency) are reported by
-`brew upgrade --dry-run`'s plan, and the command fails if that does. Relative
-paths to formula or cask files are passed on as absolute paths, as Homebrew
-runs from the home directory, and so are bottle files. Where Homebrew loads
-packages from paths (with `$HOMEBREW_DEVELOPER` and without
-`$HOMEBREW_FORBID_PACKAGES_FROM_PATHS`), a formula given as a bottle file is
-upgraded from that file, as `brew upgrade` would; otherwise Homebrew's plan
-refuses it, as `brew upgrade` does. If the file is gone once the run is
-confirmed, the command stops before upgrading anything, rather than upgrade
-the formula by name, which may pour another bottle. With no
+`brew upgrade --dry-run`'s plan, and the command fails if that does. With no
 *`installed_formula`* named, it warns about any formula that
 `brew upgrade --dry-run` lists but the batches leave out, or the other way
 round (formulae given to `--exclude` count as planned, and a name that is also
@@ -293,8 +285,7 @@ back, but the rollback may need sudo too and then fails, leaving the cask
 half-upgraded; `brew upgrade` would try them anyway.
 
 Each command it suggests to run casks later has the cask options the call
-would have been given, and names a cask given as a file by that file, with
-every argument escaped for the shell.
+would have been given, with every argument escaped for the shell.
 
 ## Output
 

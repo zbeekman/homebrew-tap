@@ -107,9 +107,9 @@ module Homebrew
         # Brew's own check of each named formula, as `brew install` makes it:
         # it says why it won't install one, stops at some (e.g. a HEAD-only
         # formula without `--HEAD`), and marks an installed one as installed on
-        # request, even with `--dry-run`. That rewrites its receipt without the
-        # build times, which are put back as they were unless receipts are left
-        # alone.
+        # request unless `--as-dependency`, even with `--dry-run`. That rewrites
+        # its receipt without the build times, which are put back as they were
+        # unless receipts are left alone.
         build_times = if args.no_stamp_receipts?
           {}
         else
@@ -120,8 +120,17 @@ module Homebrew
             Install.install_formula?(formula, head: args.HEAD?, fetch_head: args.fetch_HEAD?,
                                               only_dependencies: args.only_dependencies?, force: args.force?,
                                               quiet: args.quiet?, skip_link: args.skip_link?,
-                                              overwrite: args.overwrite?)
+                                              overwrite: args.overwrite?,
+                                              installed_on_request: !args.as_dependency?)
           end
+        rescue ArgumentError => e
+          # Brew before 7.0.13 has no `installed_on_request:` here.
+          raise unless e.message.include?("installed_on_request")
+
+          raise <<~EOS.chomp
+            `brew #{self.class.command_name}` needs Homebrew 7.0.13 or newer; this is #{HOMEBREW_VERSION}.
+            Run `brew update`, then run this command again.
+          EOS
         ensure
           # Whatever happens, as brew may be stopping the command.
           build_times.each do |formula, times|
@@ -363,7 +372,8 @@ module Homebrew
       # `leave` (full names), and any other brew installs differently on its
       # own, are left for brew to install in `installer`'s call: one with
       # options, one whose installed version isn't linked into `opt` or is
-      # the latest, one built as a bottle, which `brew upgrade` would
+      # the latest, one unlinked that brew would link (`brew upgrade` keeps
+      # it unlinked), one built as a bottle, which `brew upgrade` would
       # build again, one installed from another tap and one installed through
       # an alias whose target has changed, which `brew upgrade` would replace
       # with that target. Brew upgrades an outdated one even with
@@ -375,6 +385,11 @@ module Homebrew
           next if leave.include?(formula.full_name) || !dependency.options.empty?
           next [formula, :dependency] unless formula.any_version_installed?
           next if !formula.optlinked? || formula.latest_version_installed?
+
+          # `brew upgrade` keeps an unlinked keg unlinked; brew links it as a
+          # dependency if it would link a new one.
+          linked = Keg.new(Utils::Path.resolved_path(formula.opt_prefix)).linked?
+          next if !linked && FormulaInstaller.new(formula).link_keg
 
           tab = Tab.for_formula(formula)
           next if tab.built_bottle? || (formula.tap && tab.tap && tab.tap != formula.tap)
