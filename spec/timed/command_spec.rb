@@ -663,10 +663,11 @@ RSpec.describe Timed::Command do
     end
 
     describe ".later" do
-      it "shell-escapes every argument of the command, e.g. a flag value with a space, but not an option's `=`, " \
-         "which needs none" do
-        command = described_class.later("install", [stub_cask("foo", nil)], flags: ["--appdir=/My Apps"])
-        expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps foo`.")
+      it "names each cask by its full name and shell-escapes every argument of the command, e.g. a flag value " \
+         "with a space, but not an option's `=`, which needs none" do
+        cask = Cask::Cask.new("foo", tap: Tap.fetch("user", "tap"))
+        command = described_class.later("install", [cask], flags: ["--appdir=/My Apps"])
+        expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps user/tap/foo`.")
       end
     end
 
