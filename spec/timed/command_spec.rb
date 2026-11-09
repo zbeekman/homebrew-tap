@@ -59,14 +59,12 @@ RSpec.describe Timed::Command do
       expect(forwarded.cask).to eq(%w[--no-binaries --no-quit])
     end
 
-    it "keeps for the `-timed` commands it suggests `--exclude`, a file given to it made absolute, and " \
-       "`--no-stamp-receipts`, but not the ask flags or those that only shape the plan" do
-      dir = mktmpdir
-      FileUtils.touch dir/"lib.rb"
+    it "keeps for the `-timed` commands it suggests `--exclude` and `--no-stamp-receipts`, but not the ask " \
+       "flags or those that only shape the plan" do
       options = %w[--debug --yes --no-ask --dry-run --guess=llvm=1h --estimator=median --last=llvm
-                   --exclude=go,lib.rb --no-stamp-receipts]
-      forwarded = Dir.chdir(dir) { described_class.forward(options, conflicts:) }
-      expect(forwarded.own).to eq(["--exclude=go,#{(dir/"lib.rb").realpath}", "--no-stamp-receipts"])
+                   --exclude=go,lib --no-stamp-receipts]
+      forwarded = described_class.forward(options, conflicts:)
+      expect(forwarded.own).to eq(%w[--exclude=go,lib --no-stamp-receipts])
     end
   end
 
@@ -262,7 +260,7 @@ RSpec.describe Timed::Command do
       it "lists the casks to run first, and those to run last with why", :aggregate_failures do
         last = [entry("baz", "`pkg` requires sudo", "`postflight` block may call sudo")]
         plan = Timed::Casks::Plan.new(first: [entry("foo"), entry("bar")], last:, skipped: [])
-        expect { described_class.show_casks("upgrade", plan, named: [], flags: []) }
+        expect { described_class.show_casks("upgrade", plan, flags: []) }
           .to output(<<~EOS).to_stdout.and not_to_output.to_stderr
             ==> Would upgrade 2 casks first
             foo bar
@@ -275,7 +273,7 @@ RSpec.describe Timed::Command do
          "cask flags" do
         plan = Timed::Casks::Plan.new(first: [], last: [],
                                       skipped: [entry("foo", "`pkg` requires sudo"), entry("bar", "`kext` x")])
-        expect { described_class.show_casks("install", plan, named: [], flags: %w[--force --no-binaries]) }
+        expect { described_class.show_casks("install", plan, flags: %w[--force --no-binaries]) }
           .to output(<<~EOS).to_stderr
             Warning: Skipping 2 casks, as sudo can't ask for a password without a terminal:
             foo: `pkg` requires sudo
@@ -284,22 +282,9 @@ RSpec.describe Timed::Command do
           EOS
       end
 
-      it "names a skipped cask given as a path by that path, made absolute, in the command to run it later" do
-        dir = mktmpdir
-        (dir/"foo.rb").write(cask_source("foo", "2.0"))
-        Dir.chdir(dir) do
-          reasons = [Timed::Casks::Reason.new(kind: :sudo, message: "`pkg` requires sudo")]
-          skipped = [Timed::Casks::Entry.new(cask: Cask::CaskLoader.from_path("foo.rb"), reasons:)]
-          plan = Timed::Casks::Plan.new(first: [], last: [], skipped:)
-          path = Regexp.escape((dir/"foo.rb").realpath.to_s)
-          expect { described_class.show_casks("install", plan, named: %w[foo.rb], flags: []) }
-            .to output(/^Install it later with `brew install --cask #{path}`\.$/).to_stderr
-        end
-      end
-
       it "prints nothing without casks" do
         plan = Timed::Casks::Plan.new(first: [], last: [], skipped: [])
-        expect { described_class.show_casks("upgrade", plan, named: [], flags: []) }.not_to output.to_stdout
+        expect { described_class.show_casks("upgrade", plan, flags: []) }.not_to output.to_stdout
       end
     end
 
@@ -438,7 +423,7 @@ RSpec.describe Timed::Command do
         stub_two_foos
         casks = [stub_cask("tap-app", nil, stanzas: 'depends_on formula: "user/tap/foo"')]
         kept = [%w[foo], %w[user/tap/foo]].to_h do |unfinished|
-          kept_casks = described_class.last_casks("install", casks, named: [], flags: [], unfinished:, run: timed_run)
+          kept_casks = described_class.last_casks("install", casks, flags: [], unfinished:, run: timed_run)
           [unfinished, kept_casks]
         end
         expect(kept).to eq(%w[foo] => %w[tap-app], %w[user/tap/foo] => [])
@@ -455,7 +440,7 @@ RSpec.describe Timed::Command do
         expect(result.last.map { |entry| entry.reasons.map(&:message) })
           .to eq([["depends on `xz`, which is in this run"]])
         expect do
-          described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[xz], run: timed_run)
+          described_class.last_casks("install", [cask], flags: [], unfinished: %w[xz], run: timed_run)
         end.to output(/^xz-app: needs xz$/).to_stderr
       end
 
@@ -495,7 +480,7 @@ RSpec.describe Timed::Command do
         stub_lib_and_app
         cask = stub_cask("lib-app", nil, stanzas: 'depends_on formula: "lib"')
         expect do
-          described_class.last_casks("install", [cask], named: [], flags: [], unfinished: %w[app],
+          described_class.last_casks("install", [cask], flags: [], unfinished: %w[app],
                                                         run_dependencies: { "app" => %w[lib] }, run: timed_run)
         end.to output(/^lib-app: needs lib$/).to_stderr
       end
@@ -629,7 +614,7 @@ RSpec.describe Timed::Command do
         run = timed_run({ "lib" => "lib", "other" => "other" }, { "lib" => [], "other" => [] })
         kept = T.let(nil, T.nilable(T::Array[String]))
         expect do
-          kept = described_class.last_casks("install", casks, named: [], flags: %w[--force], unfinished: %w[lib],
+          kept = described_class.last_casks("install", casks, flags: %w[--force], unfinished: %w[lib],
                                                               run:)
         end.to output(<<~EOS).to_stderr
           Warning: Not installing 3 casks, which need formulae that didn't install and aren't installed:
@@ -645,7 +630,7 @@ RSpec.describe Timed::Command do
         stub_lib_and_app
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
         expect do
-          described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib], run: timed_run)
+          described_class.last_casks("upgrade", casks, flags: [], unfinished: %w[lib], run: timed_run)
         end.to output(<<~EOS).to_stderr
           Warning: Not upgrading 1 cask, which needs formulae that didn't upgrade and aren't installed:
           direct-app: needs lib
@@ -657,7 +642,7 @@ RSpec.describe Timed::Command do
         stub_lib_and_app(installed_lib: true)
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "lib"')]
         expect do
-          described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: %w[lib], run: timed_run)
+          described_class.last_casks("upgrade", casks, flags: [], unfinished: %w[lib], run: timed_run)
         end.not_to output.to_stderr
       end
 
@@ -665,30 +650,23 @@ RSpec.describe Timed::Command do
         allow(Formulary).to receive(:factory).and_call_original
         allow(Formulary).to receive(:factory).with("user/tap/evil").and_raise(Homebrew::UntrustedTapError, "no")
         casks = [stub_cask("direct-app", nil, stanzas: 'depends_on formula: "user/tap/evil"')]
-        expect(described_class.last_casks("upgrade", casks, named: [], flags: [], unfinished: [], run: timed_run))
+        expect(described_class.last_casks("upgrade", casks, flags: [], unfinished: [], run: timed_run))
           .to eq(%w[direct-app])
       end
 
       it "doesn't take a cask it can't load as a formula of the same name that didn't install" do
         casks = [stub_cask("gone-dep-app", nil, stanzas: 'depends_on cask: "gone/tap/foo"')]
         expect do
-          described_class.last_casks("install", casks, named: [], flags: [], unfinished: %w[foo], run: timed_run)
+          described_class.last_casks("install", casks, flags: [], unfinished: %w[foo], run: timed_run)
         end.not_to output.to_stderr
       end
     end
 
     describe ".later" do
-      it "shell-escapes every argument of the command, e.g. a path or flag value with a space, but not an " \
-         "option's `=`, which needs none" do
-        dir = mktmpdir/"My Casks"
-        dir.mkpath
-        (dir/"foo.rb").write(cask_source("foo", "2.0"))
-        Dir.chdir(dir) do
-          casks = [Cask::CaskLoader.from_path("foo.rb")]
-          command = described_class.later("install", casks, named: %w[foo.rb], flags: ["--appdir=/My Apps"])
-          expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps " \
-                                "#{(dir/"foo.rb").realpath.to_s.gsub(" ", "\\ ")}`.")
-        end
+      it "shell-escapes every argument of the command, e.g. a flag value with a space, but not an option's `=`, " \
+         "which needs none" do
+        command = described_class.later("install", [stub_cask("foo", nil)], flags: ["--appdir=/My Apps"])
+        expect(command).to eq("Install it later with `brew install --cask --appdir=/My\\ Apps foo`.")
       end
     end
 
@@ -698,7 +676,7 @@ RSpec.describe Timed::Command do
       it "returns what running the formulae, given the calls after them, returns" do
         casks = [stub_cask("iterm2", nil)]
         calls = [instance_double(Timed::Runner::After)]
-        returned = described_class.before_last_casks("upgrade", casks, named: [], flags: [], run:,
+        returned = described_class.before_last_casks("upgrade", casks, flags: [], run:,
                                                                       after: -> { calls }) do |after|
           [after, :outcome]
         end
@@ -709,7 +687,7 @@ RSpec.describe Timed::Command do
          "and stops too" do
         casks = [stub_cask("iterm2", nil), stub_cask("firefox", nil)]
         expect do
-          described_class.before_last_casks("install", casks, named: [], flags: %w[--force], run:) { raise Interrupt }
+          described_class.before_last_casks("install", casks, flags: %w[--force], run:) { raise Interrupt }
         end.to raise_error(Interrupt).and output(<<~EOS).to_stderr
           Warning: Interrupted, so the casks to install after the formulae didn't run: iterm2 firefox
           Install them later with `brew install --cask --force iterm2 firefox`.
@@ -719,7 +697,7 @@ RSpec.describe Timed::Command do
       it "says the batches didn't run when Ctrl-C stops working out the calls after them, before the batches" do
         interrupt = -> { raise Interrupt }
         expect do
-          described_class.before_last_casks("install", [], named: [], flags: [], run:, after: interrupt) do
+          described_class.before_last_casks("install", [], flags: [], run:, after: interrupt) do
             raise "the batches ran"
           end
         end.to raise_error(Interrupt).and output("Warning: Interrupted, so the batches didn't run.\n").to_stderr
@@ -727,7 +705,7 @@ RSpec.describe Timed::Command do
 
       it "says nothing more on Ctrl-C without such casks" do
         expect do
-          described_class.before_last_casks("install", [], named: [], flags: [], run:) { raise Interrupt }
+          described_class.before_last_casks("install", [], flags: [], run:) { raise Interrupt }
         end.to raise_error(Interrupt).and not_to_output.to_stderr
       end
     end
@@ -742,7 +720,7 @@ RSpec.describe Timed::Command do
                                       roots:   { "app" => "/My Formulae/app.rb", "other" => "other" },
                                       needs:   { "app" => %w[lib], "other" => [] })
         expect do
-          described_class.casks_not_run("Interrupted", "install", casks, named: [], flags: %w[--force], run:)
+          described_class.casks_not_run("Interrupted", "install", casks, flags: %w[--force], run:)
         end.to output(<<~EOS).to_stderr
           Warning: Interrupted, so the casks to install after the formulae didn't run: lib-app free-app
           1 cask needs formulae of this run that aren't installed, which brew would
@@ -759,7 +737,7 @@ RSpec.describe Timed::Command do
         run = Timed::Command::Run.new(command: %w[install-timed --exclude=x], roots: { "app" => "/f/a=b.rb" },
                                       needs: { "app" => %w[lib] })
         expect do
-          described_class.casks_not_run("Interrupted", "install", casks, named: [], flags: [], run:)
+          described_class.casks_not_run("Interrupted", "install", casks, flags: [], run:)
         end.to output(%r{^Finish those first with `brew install-timed --exclude=x /f/a\\=b\.rb`, }).to_stderr
       end
 
@@ -769,24 +747,11 @@ RSpec.describe Timed::Command do
         run = Timed::Command::Run.new(command: %w[upgrade-timed], roots: { "app" => "app" },
                                       needs: { "app" => %w[lib] })
         expect do
-          described_class.casks_not_run("`brew upgrade` stopped early", "upgrade", casks, named: [], flags: [], run:)
+          described_class.casks_not_run("`brew upgrade` stopped early", "upgrade", casks, flags: [], run:)
         end.to output(<<~EOS).to_stderr
           Warning: `brew upgrade` stopped early, so the cask to upgrade after the formulae didn't run: lib-app
           Upgrade it later with `brew upgrade --cask lib-app`.
         EOS
-      end
-    end
-
-    describe ".cask_arguments" do
-      it "gives each cask named by a path that path, made absolute, and the others their full names" do
-        dir = mktmpdir
-        (dir/"foo.rb").write(cask_source("foo", "2.0"))
-        bar = Cask::Cask.new("bar", tap: Tap.fetch("user", "tap"))
-        Dir.chdir(dir) do
-          foo = Cask::CaskLoader.from_path("foo.rb")
-          expect(described_class.cask_arguments(%w[foo.rb user/tap/bar], [foo, bar]))
-            .to eq([(dir/"foo.rb").realpath.to_s, "user/tap/bar"])
-        end
       end
     end
   end
@@ -1106,23 +1071,15 @@ RSpec.describe Timed::Command do
   end
 
   describe ".named_argv" do
-    it "makes paths brew would load a formula or cask from absolute, as the sub-calls run elsewhere" do
-      dir = mktmpdir
-      (dir/"foo.rb").write("")
-      (dir/"bar.json").write("")
-      Dir.chdir(dir) do
-        expect(described_class.named_argv(%w[foo.rb bar.json missing.rb foo]))
-          .to eq([(dir/"foo.rb").realpath.to_s, (dir/"bar.json").realpath.to_s, "missing.rb", "foo"])
-      end
-    end
-
-    it "makes bottle files absolute, as brew loads a formula from them too" do
+    it "makes bottle files absolute, as the sub-calls run elsewhere, leaving other names as they are" do
       dir = mktmpdir
       bottle = "foo--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"
       (dir/bottle).write("")
+      (dir/"foo.rb").write("")
       Dir.chdir(dir) do
-        expect(described_class.named_argv([bottle, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"]))
-          .to eq([(dir/bottle).realpath.to_s, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz"])
+        expect(described_class.named_argv([bottle, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz", "foo.rb",
+                                           "foo"]))
+          .to eq([(dir/bottle).realpath.to_s, "missing--2.0.#{Utils::Bottles.tag}.bottle.tar.gz", "foo.rb", "foo"])
       end
     end
 
@@ -1136,35 +1093,9 @@ RSpec.describe Timed::Command do
         expect(described_class.named_argv(["link/../#{bottle}"])).to eq([(dir/"real").realpath.join(bottle).to_s])
       end
     end
-
-    it "makes a formula or cask file absolute as written, `..` dropping the directory before it, as brew loads it" do
-      dir = mktmpdir
-      (dir/"real/sub").mkpath
-      (dir/"foo.rb").write("")
-      (dir/"bar.json").write("")
-      FileUtils.ln_s dir/"real/sub", dir/"link"
-      Dir.chdir(dir) do
-        expect(described_class.named_argv(%w[link/../foo.rb link/../bar.json]))
-          .to eq([(dir/"foo.rb").realpath.to_s, (dir/"bar.json").realpath.to_s])
-      end
-    end
   end
 
   describe ".path_arguments" do
-    it "gives each formula named by a path that path, made absolute, and leaves the others to their names" do
-      dir = mktmpdir
-      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-1.0.tgz\"\nend\n")
-      bar = formula("bar") do
-        T.bind(self, T.class_of(Formula))
-        url "https://brew.sh/bar-1.0.tgz"
-      end
-      Dir.chdir(dir) do
-        foo = Formulary.from_path("foo.rb")
-        expect(described_class.path_arguments(%w[foo.rb bar], { "foo" => foo, "bar" => bar }))
-          .to eq("foo" => (dir/"foo.rb").realpath.to_s)
-      end
-    end
-
     it "gives a formula loaded from a bottle file that file as given, made absolute, even through a symlink " \
        "whose target brew wouldn't load a bottle from" do
       dir = mktmpdir
@@ -1194,9 +1125,9 @@ RSpec.describe Timed::Command do
         .to raise_error(RuntimeError, <<~EOS.chomp)
           The bottle file foo was loaded from can no longer be found:
             #{bottle}
-          Nothing was installed, upgraded or reinstalled, as by name foo
-          may pour another bottle. Put the file back and run this command again,
-          or name foo instead of the file.
+          Nothing was installed, as by name foo may pour another bottle.
+          Put the file back and run this command again, or name foo instead
+          of the file.
         EOS
     end
   end

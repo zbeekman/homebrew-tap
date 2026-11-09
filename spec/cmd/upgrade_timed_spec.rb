@@ -204,13 +204,6 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       expect(brew_calls).to eq([%w[upgrade --dry-run --verbose cmake]])
     end
 
-    it "passes the named arguments to the preview as the sub-calls need them" do
-      stub_formula("cmake")
-      allow(Timed::Command).to receive(:named_argv).with(%w[cmake]).and_return(%w[/work/cmake])
-      run_command("--dry-run", "cmake")
-      expect(brew_calls).to eq([%w[upgrade --dry-run /work/cmake]])
-    end
-
     it "plans every outdated, unpinned formula, dependencies first, then the quickest" do
       stub_formula("cmake")
       stub_formula("lib", bottled: true)

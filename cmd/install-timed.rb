@@ -183,8 +183,8 @@ module Homebrew
         # dependencies it prints and asks about before it reads the bottle
         # manifests, and those it installs after, so they are checked
         # (`verify_deps_exist`, which keeps them) first. A formula named twice
-        # (e.g. by name and as a file) is installed as named first, as brew
-        # skips the second (`check_installation_already_attempted`).
+        # (e.g. by name and as a bottle file) is installed as named first, as
+        # brew skips the second (`check_installation_already_attempted`).
         installers = Install.select_formula_installers(installers, action: lambda do |installer|
           installer.verify_deps_exist unless installer.ignore_deps?
           installer.determine_bottle_tab_attributes
@@ -275,7 +275,7 @@ module Homebrew
         cask_plan = Timed::Command.cask_plan({ install: new_casks, upgrade: upgrading },
                                              in_run: planned, run_dependencies:, force: args.force?,
                                              skip_cask_deps: args.skip_cask_deps?)
-        Timed::Command.show_casks("install", cask_plan, named: args.named, flags: forwarded.cask)
+        Timed::Command.show_casks("install", cask_plan, flags: forwarded.cask)
         # The installed casks brew won't upgrade, which it only reports on.
         first_casks = cask_plan.first.map(&:cask) + (casks - new_casks - upgrading)
         last_casks = cask_plan.last.map(&:cask)
@@ -308,8 +308,7 @@ module Homebrew
         Homebrew::Diagnostic.support_tiers.clear
         # Before anything runs, as it stops on a bottle file that is gone.
         arguments = Timed::Command.path_arguments(args.named, formulae)
-        Timed::Runner.run_casks("install", Timed::Command.cask_arguments(args.named, first_casks),
-                                flags: forwarded.cask, label: "first")
+        Timed::Runner.run_casks("install", first_casks.map(&:full_name), flags: forwarded.cask, label: "first")
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
                                       roots:   planned_installers.to_h do |installer|
                                         name = installer.formula.full_name
@@ -336,12 +335,12 @@ module Homebrew
           # the last casks points to it.
           finish_given = T.let(false, T::Boolean)
           finish = lambda do |names|
-            command = Timed::Command.finish_command("install", run, names, casks: last_casks, named: args.named,
-                                                                           flags: forwarded.cask, run_dependencies:)
+            command = Timed::Command.finish_command("install", run, names, casks: last_casks, flags: forwarded.cask,
+                                                                           run_dependencies:)
             finish_given ||= !command.nil?
             command
           end
-          Timed::Command.before_last_casks("install", last_casks, named: args.named, flags: forwarded.cask, run:,
+          Timed::Command.before_last_casks("install", last_casks, flags: forwarded.cask, run:,
                                                                   after:, merged: -> { finish_given }) do |calls|
             Timed::Runner.run(result.batches, verb: "install", flags: forwarded.formula, formulae:, deps:,
                                               stamp: !args.no_stamp_receipts?, succeeded:,
@@ -349,7 +348,7 @@ module Homebrew
                                               verbs: dependency_calls, dependency_of:, finish:, after: calls)
           end
         end
-        last = Timed::Command.last_casks("install", last_casks, named: args.named, flags: forwarded.cask,
+        last = Timed::Command.last_casks("install", last_casks, flags: forwarded.cask,
                                                                 unfinished: outcome&.unfinished || [], run:,
                                                                 run_dependencies:, merged: true)
         Timed::Runner.run_casks("install", last, flags: forwarded.cask, label: "last")

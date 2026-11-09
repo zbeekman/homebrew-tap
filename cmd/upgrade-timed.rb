@@ -78,8 +78,8 @@ module Homebrew
         end
         needs = dependencies(roots)
         deps = needs.transform_values { |dependencies| dependencies.map(&:full_name) }
-        # A formula named twice (e.g. by name and as a file) is upgraded as
-        # named first, as `brew upgrade` does.
+        # A formula named twice (e.g. by name and by an old alias) is upgraded
+        # as named first, as `brew upgrade` does.
         formulae = (roots + needs.values.flatten).uniq(&:full_name).to_h { |formula| [formula.full_name, formula] }
         set = needs.keys
         estimates = Timed::Command.estimates(set.to_h { |name| [name, formulae.fetch(name)] },
@@ -99,7 +99,7 @@ module Homebrew
         # upgrade.
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
-        preview_argv = ["upgrade", "--dry-run", *forwarded.preview, *Timed::Command.named_argv(args.named)]
+        preview_argv = ["upgrade", "--dry-run", *forwarded.preview, *args.named]
         preview = T.let([], T::Array[String])
         Homebrew.failed = true unless Timed::Runner.stream(preview_argv) { |line| preview << line }
         excluded = set & exclude
@@ -138,7 +138,7 @@ module Homebrew
         run_dependencies = deps.slice(*planned)
         cask_plan = Timed::Command.cask_plan({ upgrade: outdated }, in_run: planned, run_dependencies:,
                                                                     skip_cask_deps: args.skip_cask_deps?)
-        Timed::Command.show_casks("upgrade", cask_plan, named: args.named, flags: cask_flags)
+        Timed::Command.show_casks("upgrade", cask_plan, flags: cask_flags)
         casks = (cask_plan.first + cask_plan.last).map(&:cask)
         return if args.dry_run? || (planned.empty? && casks.empty?)
 
@@ -157,9 +157,7 @@ module Homebrew
         # unasked.
         Homebrew::Ask.confirm?(action: "upgrade") if ask
 
-        # Before anything runs, as it stops on a bottle file that is gone.
-        arguments = Timed::Command.path_arguments(args.named, formulae)
-        Timed::Runner.run_casks("upgrade", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
+        Timed::Runner.run_casks("upgrade", cask_plan.first.map { |entry| entry.cask.full_name },
                                 flags: cask_flags, label: "first")
         last = cask_plan.last.map(&:cask)
         # To finish them, the formulae given (all the outdated ones with no
@@ -170,7 +168,7 @@ module Homebrew
           next unless planned.include?(root.full_name)
 
           formula = upgradeable.fetch(index)
-          [root.full_name, arguments.fetch(formula.full_name, formula.full_name)]
+          [root.full_name, formula.full_name]
         end.uniq(&:first).to_h
         run = Timed::Command::Run.new(command: [self.class.command_name, *flags, *forwarded.own], roots: given,
                                       needs:   deps.slice(*given.keys))
@@ -182,14 +180,14 @@ module Homebrew
           # The outdated dependents and broken linkage are seen to before the
           # last casks, which may need them.
           after = -> { Timed::Command.after(dependents, checked, args:, flags:, excluded: exclude, own: forwarded.own) }
-          Timed::Command.before_last_casks("upgrade", last, named: args.named, flags: cask_flags, run:,
+          Timed::Command.before_last_casks("upgrade", last, flags: cask_flags, run:,
                                                             after:) do |calls|
             Timed::Runner.run(result.batches, verb: "upgrade", flags:, formulae:, deps:,
                                               pours: set.select { |name| estimates.fetch(name).pour }, pour_flags:,
-                                              stamp: !args.no_stamp_receipts?, apart: true, arguments:, after: calls)
+                                              stamp: !args.no_stamp_receipts?, apart: true, after: calls)
           end
         end
-        last = Timed::Command.last_casks("upgrade", last, named: args.named, flags: cask_flags,
+        last = Timed::Command.last_casks("upgrade", last, flags: cask_flags,
                                                           unfinished: outcome&.unfinished || [], run:,
                                                           run_dependencies:)
         Timed::Runner.run_casks("upgrade", last, flags: cask_flags, label: "last")

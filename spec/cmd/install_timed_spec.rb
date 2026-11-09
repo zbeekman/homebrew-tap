@@ -500,7 +500,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "estimates a formula given as a bottle file as a pour" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       pour = T.let(nil, T.nilable(T::Boolean))
       allow(Timed::Command).to receive(:show_plan) { |_, _, estimates| pour = estimates.fetch("foo").pour }
       run_command("--dry-run", bottle_file.to_s)
@@ -1020,15 +1019,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "names a formula given as a bottle file to `brew install` by that file, made absolute" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(false)
-      bottle = bottle_file
-      failing << bottle.basename.to_s
-      Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) }
-      expect(brew_calls).to eq([["install", "--formula", "--yes", "--display-times", bottle.to_s]])
-    end
-
-    it "loads a bottle file as `brew install` does, though brew forbids packages from other paths" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       bottle = bottle_file
       failing << bottle.basename.to_s
       Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) }
@@ -1036,7 +1026,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "logs a formula poured from a bottle file by name and stamps its receipt", :aggregate_failures do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       bottle = bottle_file
       installs[bottle.basename.to_s] = ["foo"]
       run_command("--yes", bottle.to_s)
@@ -1046,7 +1035,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "gives a bottle file that didn't pour, made absolute, in the command that finishes the run" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       bottle = bottle_file
       failing << bottle.basename.to_s
       expect { Dir.chdir(bottle.dirname) { run_command("--yes", bottle.basename.to_s) } }
@@ -1054,7 +1042,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "installs a formula named twice, as a bottle file and by name, as named first, as `brew install` does" do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       stub_formula_path(stub_formula("foo"))
       bottle = bottle_file
       failing.push("foo", bottle.basename.to_s)
@@ -1070,7 +1057,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     it "stops before running anything on a bottle file gone since it was loaded, rather than pour another bottle",
        :aggregate_failures do
       stub_cask("firefox", nil)
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       bottle = bottle_file
       allow(Timed::Command).to receive(:show_plan) { bottle.delete }
       expect { run_command("--yes", "firefox", bottle.to_s) }.to raise_error(RuntimeError, /can no longer be found/)
@@ -1078,7 +1064,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "fails on a bottle file that doesn't exist before running anything", :aggregate_failures do
-      allow(Homebrew::EnvConfig).to receive(:forbid_packages_from_paths?).and_return(true)
       name = "nope--1.0.#{Utils::Bottles.tag}.bottle.tar.gz"
       expect { Dir.chdir(mktmpdir) { run_command("--yes", name) } }
         .to raise_error(FormulaUnavailableError, /No available formula with the name "#{Regexp.escape(name)}"/)
