@@ -123,6 +123,14 @@ module Homebrew
                                               overwrite: args.overwrite?,
                                               installed_on_request: !args.as_dependency?)
           end
+        rescue ArgumentError => e
+          # Brew before 7.0.13 has no `installed_on_request:` here.
+          raise unless e.message.include?("installed_on_request")
+
+          raise <<~EOS.chomp
+            `brew #{self.class.command_name}` needs Homebrew 7.0.13 or newer; this is #{HOMEBREW_VERSION}.
+            Run `brew update`, then run this command again.
+          EOS
         ensure
           # Whatever happens, as brew may be stopping the command.
           build_times.each do |formula, times|

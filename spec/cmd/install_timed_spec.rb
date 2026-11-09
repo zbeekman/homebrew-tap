@@ -166,6 +166,16 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
                                     "use `brew install --interactive` instead.")
     end
 
+    it "stops before running anything on a Homebrew too old to install as brew now does, saying to update it",
+       :aggregate_failures do
+      stub_formula("cmake")
+      allow(Homebrew::Install).to receive(:install_formula?)
+        .and_raise(ArgumentError, "unknown keyword: :installed_on_request")
+      expect { run_command("--yes", "cmake") }
+        .to raise_error(RuntimeError, /needs Homebrew 7\.0\.13 or newer.*\n.*Run `brew update`/)
+      expect(brew_calls).to eq([])
+    end
+
     it "fails on unknown `--last`, `--exclude` and `--guess` names, naming the flag, before running anything",
        :aggregate_failures do
       stub_formula("cmake")
