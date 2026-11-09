@@ -78,7 +78,7 @@ module Homebrew
         cask_dependencies = Install.print_dry_run_casks(casks, action:         "reinstall",
                                                                skip_cask_deps: args.skip_cask_deps?)
         # Brew reinstalls the new target of the alias a formula was installed
-        # with, and a formula named twice (e.g. by name and as a file) as
+        # with, and a formula named twice (e.g. by name and by an old alias) as
         # named first.
         latest = named.filter_map do |formula|
           if formula.pinned?
@@ -129,7 +129,7 @@ module Homebrew
                                              force: args.force?, skip_cask_deps: args.skip_cask_deps?)
         forwarded = Timed::Command.forward(Timed::Command.options(args, self.class.parser),
                                            conflicts: self.class.parser.conflicts)
-        Timed::Command.show_casks("reinstall", cask_plan, named: args.named, flags: forwarded.cask)
+        Timed::Command.show_casks("reinstall", cask_plan, flags: forwarded.cask)
         return if args.dry_run? || [result.batches, dependents, cask_plan.first, cask_plan.last].all?(&:empty?)
 
         # Once, by brew's rules: if brew would install or upgrade dependencies
@@ -144,13 +144,11 @@ module Homebrew
           Homebrew::Ask.confirm?(action: "reinstallation")
         end
 
-        # Before anything runs, as it stops on a bottle file that is gone.
-        arguments = Timed::Command.path_arguments(args.named, formulae)
-        Timed::Runner.run_casks("reinstall", Timed::Command.cask_arguments(args.named, cask_plan.first.map(&:cask)),
+        Timed::Runner.run_casks("reinstall", cask_plan.first.map { |entry| entry.cask.full_name },
                                 flags: forwarded.cask, label: "first")
         last = cask_plan.last.map(&:cask)
         run = Timed::Command::Run.new(command: [self.class.command_name, *forwarded.formula, *forwarded.own],
-                                      roots:   planned.to_h { |name| [name, arguments.fetch(name, name)] },
+                                      roots:   planned.to_h { |name| [name, name] },
                                       needs:   run_dependencies)
         outcome = if result.batches.any? || dependents.any?
           # The outdated dependents and broken linkage are seen to before the
@@ -165,20 +163,20 @@ module Homebrew
           end
           # One call, so nothing is skipped for a failure, but a failed build
           # ends `brew reinstall` before the formulae after it.
-          Timed::Command.before_last_casks("reinstall", last, named: args.named, flags: forwarded.cask, run:,
+          Timed::Command.before_last_casks("reinstall", last, flags: forwarded.cask, run:,
                                                               after:) do |calls|
             Timed::Runner.run(result.batches, verb: "reinstall", flags: forwarded.formula, formulae:, deps: {},
                                               stamp: !args.no_stamp_receipts?, stops_at_failure: true,
-                                              succeeded: Timed::Runner::REINSTALLED, arguments:, after: calls)
+                                              succeeded: Timed::Runner::REINSTALLED, after: calls)
           end
         end
         # What stops `brew reinstall` early, such as a failed build, stops it
         # before its casks too.
         if outcome&.stopped_early && last.any?
           Timed::Command.casks_not_run("`brew reinstall` stopped early", "reinstall", last,
-                                       named: args.named, flags: forwarded.cask, run:)
+                                       flags: forwarded.cask, run:)
         else
-          last = Timed::Command.last_casks("reinstall", last, named: args.named, flags: forwarded.cask,
+          last = Timed::Command.last_casks("reinstall", last, flags: forwarded.cask,
                                                               unfinished: outcome&.unfinished || [], run:,
                                                               run_dependencies:)
           Timed::Runner.run_casks("reinstall", last, flags: forwarded.cask, label: "last")

@@ -161,11 +161,7 @@ module Timed
       # A `--[no-]…` switch is named without `no_` in the conflicts.
       names = ->(option) { [option_name(option), option_name(option).delete_prefix("no_")] }
       split = preview.reject { |option| KIND_FLAGS.include?(option_name(option)) }
-      own = options.select { |option| KEPT_FLAGS.include?(option_name(option)) }.map do |option|
-        name, value = option.split("=", 2)
-        # A file, made absolute, as for the named arguments.
-        value ? "#{name}=#{named_argv(value.split(",")).join(",")}" : option
-      end
+      own = options.select { |option| KEPT_FLAGS.include?(option_name(option)) }
       Forwarded.new(
         preview:,
         formula: split.reject { |option| cask_only.intersect?(names.call(option)) },
@@ -506,48 +502,44 @@ module Timed
     def self.brew(env, argv) = Kernel.system(env, HOMEBREW_BREW_FILE.to_s, *argv, chdir: Dir.home)
 
     # Named arguments for the sub-calls, which run from another directory:
-    # paths brew would load a formula (`.rb`, a bottle file) or cask (`.rb`,
-    # `.json`) from made absolute, as brew resolves them: `.rb` and `.json`
-    # paths as written (`..` drops the directory before it), a bottle file
-    # through its directory on disk, keeping its name, as brew loads a bottle
-    # only from a file named like one.
+    # bottle files, the only paths brew still loads (`brew install` only),
+    # made absolute through their directory on disk, keeping their names, as
+    # brew loads a bottle only from a file named like one.
     sig { params(names: T::Array[String]).returns(T::Array[String]) }
     def self.named_argv(names)
       names.map do |name|
         if HOMEBREW_BOTTLES_EXTNAME_REGEX.match?(name) && File.exist?(name)
           File.join(File.realpath(File.dirname(name)), File.basename(name))
-        elsif name.end_with?(".rb", ".json") && File.exist?(File.expand_path(name))
-          File.expand_path(name)
         else
           name
         end
       end
     end
 
-    # The argument for each of `formulae` (by full name) that `names` gave as
-    # a path, as `named_argv` makes it. Brew loads such a formula from that
-    # file only: by name, a sub-call would load another formula, or the one
-    # stored in its installed keg. A formula loaded from a bottle file is
-    # matched by the file's real path (`local_bottle_path`) but given the
-    # path as named, as brew loads a bottle only from a file named like one,
-    # which a symlink's target may not be. If that file is gone, it raises:
-    # by name, a sub-call may pour another bottle.
+    # The argument for each of `formulae` (by full name) loaded from a bottle
+    # file that `names` gave, as `named_argv` makes it: by name, a sub-call
+    # would install another bottle or build from source. It is matched by the
+    # file's real path (`local_bottle_path`) but given as named, as brew loads
+    # a bottle only from a file named like one, which a symlink's target may
+    # not be. If that file is gone, it raises: by name, a sub-call may pour
+    # another bottle.
     sig { params(names: T::Array[String], formulae: T::Hash[String, Formula]).returns(T::Hash[String, String]) }
     def self.path_arguments(names, formulae)
       paths = named_argv(names)
       formulae.filter_map do |name, formula|
-        argument = if (bottle = formula.local_bottle_path)
-          paths.find { |path| File.exist?(path) && File.realpath(path) == bottle.to_s } || raise(<<~EOS.chomp)
-            The bottle file #{name} was loaded from can no longer be found:
-              #{bottle}
-            Nothing was installed, upgraded or reinstalled, as by name #{name}
-            may pour another bottle. Put the file back and run this command again,
-            or name #{name} instead of the file.
-          EOS
-        elsif paths.include?(formula.path.to_s)
-          formula.path.to_s
-        end
-        [name, argument] if argument
+        bottle = formula.local_bottle_path
+        next if bottle.nil?
+
+        argument = paths.find { |path| File.exist?(path) && File.realpath(path) == bottle.to_s }
+        raise <<~EOS.chomp if argument.nil?
+          The bottle file #{name} was loaded from can no longer be found:
+            #{bottle}
+          Nothing was installed, as by name #{name} may pour another bottle.
+          Put the file back and run this command again, or name #{name} instead
+          of the file.
+        EOS
+
+        [name, argument]
       end.to_h
     end
 
@@ -958,8 +950,8 @@ module Timed
     # Lists the casks to run before the formulae and those to run after them,
     # with why, and warns about those skipped for want of a terminal, with the
     # command to run them later (see `later`).
-    sig { params(verb: String, plan: Casks::Plan, named: T::Array[String], flags: T::Array[String]).void }
-    def self.show_casks(verb, plan, named:, flags:)
+    sig { params(verb: String, plan: Casks::Plan, flags: T::Array[String]).void }
+    def self.show_casks(verb, plan, flags:)
       rows = lambda do |entries|
         entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
       end
@@ -975,7 +967,7 @@ module Timed
       opoo <<~EOS
         Skipping #{Utils.pluralize("cask", casks.length, include_count: true)}, as sudo can't ask for a password without a terminal:
         #{rows.call(plan.skipped).join("\n")}
-        #{later(verb, casks, named:, flags:)}
+        #{later(verb, casks, flags:)}
       EOS
     end
 
@@ -1084,10 +1076,10 @@ module Timed
     # The formulae a `-timed` command runs, to finish them later: `command`,
     # the `-timed` command with the formula flags its calls were given;
     # `roots`, the formulae (by full name) it was given that it runs, each
-    # with its argument (the file given, see `path_arguments`, or its name),
-    # so that flags only for those given (e.g. `--build-from-source`) stay
-    # theirs; `needs`, what brew installs or upgrades for each of `roots`, by
-    # full name.
+    # with its argument (the bottle file given, see `path_arguments`, or its
+    # name), so that flags only for those given (e.g. `--build-from-source`)
+    # stay theirs; `needs`, what brew installs or upgrades for each of
+    # `roots`, by full name.
     class Run < T::Struct
       const :command, T::Array[String]
       const :roots, T::Hash[String, String]
@@ -1101,15 +1093,14 @@ module Timed
     # the batches didn't run if it stopped `after`. `merged` says whether the
     # commands that finish the formulae, then the casks, were given already.
     sig {
-      type_parameters(:U).params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
-                                 flags: T::Array[String], run: Run,
+      type_parameters(:U).params(verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String], run: Run,
                                  after: T.proc.returns(T.nilable(T::Array[Runner::After])),
                                  merged: T.proc.returns(T::Boolean),
                                  _block: T.proc.params(after: T.nilable(T::Array[Runner::After]))
                                           .returns(T.type_parameter(:U)))
                          .returns(T.type_parameter(:U))
     }
-    def self.before_last_casks(verb, casks, named:, flags:, run:, after: -> {}, merged: -> { false }, &_block)
+    def self.before_last_casks(verb, casks, flags:, run:, after: -> {}, merged: -> { false }, &_block)
       calls = begin
         after.call
       rescue Interrupt
@@ -1118,25 +1109,25 @@ module Timed
       end
       yield calls
     rescue Interrupt
-      casks_not_run("Interrupted", verb, casks, named:, flags:, run:, merged: merged.call) if casks.any?
+      casks_not_run("Interrupted", verb, casks, flags:, run:, merged: merged.call) if casks.any?
       raise
     end
 
     # Says that the `casks` to run after the formulae didn't run, and why
-    # (`reason`), naming them as `cask_arguments` does for the `named`
-    # arguments, with how to run them later (see `later`), but those that
-    # need a formula of the `run` that isn't installed (see `blocked_casks`)
-    # with how to finish that first (see `finish_first`, given `merged`).
+    # (`reason`), naming them by full name, with how to run them later (see
+    # `later`), but those that need a formula of the `run` that isn't
+    # installed (see `blocked_casks`) with how to finish that first (see
+    # `finish_first`, given `merged`).
     sig {
-      params(reason: String, verb: String, casks: T::Array[Cask::Cask], named: T::Array[String],
-             flags: T::Array[String], run: Run, merged: T::Boolean).void
+      params(reason: String, verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String], run: Run,
+             merged: T::Boolean).void
     }
-    def self.casks_not_run(reason, verb, casks, named:, flags:, run:, merged: false)
+    def self.casks_not_run(reason, verb, casks, flags:, run:, merged: false)
       message = "#{reason}, so the #{Utils.pluralize("cask", casks.length)} to #{verb} after the formulae " \
-                "didn't run: #{cask_arguments(named, casks).join(" ")}"
+                "didn't run: #{casks.map(&:full_name).join(" ")}"
       blocked = blocked_casks(casks, run.roots.keys | run.needs.values.flatten)
       if blocked.empty?
-        opoo "#{message}\n#{later(verb, casks, named:, flags:)}"
+        opoo "#{message}\n#{later(verb, casks, flags:)}"
         return
       end
 
@@ -1147,11 +1138,11 @@ module Timed
         "#{Utils.pluralize("cask", blocked.length, include_count: true)} #{one ? "needs" : "need"} formulae of " \
         "this run that aren't installed, which brew would\n" \
         "install for #{one ? "it" : "them"}, but not as this run would:",
-        *finish_first(verb, blocked, named:, flags:, run:, merged:),
+        *finish_first(verb, blocked, flags:, run:, merged:),
       ]
       if ready.any?
         lines << "#{verb.capitalize} the #{(ready.length == 1) ? "other" : "others"} later with " \
-                 "`#{cask_command(verb, ready, named:, flags:)}`."
+                 "`#{cask_command(verb, ready, flags:)}`."
       end
       opoo lines.join("\n")
     end
@@ -1188,13 +1179,13 @@ module Timed
     # only the casks' command, for once those are installed. With `merged`,
     # those commands were given already (see `finish_command`).
     sig {
-      params(verb: String, blocked: T::Hash[Cask::Cask, T::Array[String]], named: T::Array[String],
-             flags: T::Array[String], run: Run, merged: T::Boolean).returns(T::Array[String])
+      params(verb: String, blocked: T::Hash[Cask::Cask, T::Array[String]], flags: T::Array[String], run: Run,
+             merged: T::Boolean).returns(T::Array[String])
     }
-    def self.finish_first(verb, blocked, named:, flags:, run:, merged: false)
+    def self.finish_first(verb, blocked, flags:, run:, merged: false)
       command = finish_run(run, blocked.values.flatten)
       them = (blocked.length == 1) ? "it" : "them"
-      casks = "#{verb} #{them} with `#{cask_command(verb, blocked.keys, named:, flags:)}`."
+      casks = "#{verb} #{them} with `#{cask_command(verb, blocked.keys, flags:)}`."
       finish = if command.nil?
         "Once those are installed, #{casks}"
       elsif merged
@@ -1213,17 +1204,17 @@ module Timed
     # (`run_dependencies`), as `last_casks` leaves those out; nil without
     # such a formula. `last_casks` given `merged` then points to it.
     sig {
-      params(verb: String, run: Run, left: T::Array[String], casks: T::Array[Cask::Cask], named: T::Array[String],
-             flags: T::Array[String], run_dependencies: T::Hash[String, T::Array[String]]).returns(T.nilable(String))
+      params(verb: String, run: Run, left: T::Array[String], casks: T::Array[Cask::Cask], flags: T::Array[String],
+             run_dependencies: T::Hash[String, T::Array[String]]).returns(T.nilable(String))
     }
-    def self.finish_command(verb, run, left, casks:, named:, flags:, run_dependencies:)
+    def self.finish_command(verb, run, left, casks:, flags:, run_dependencies:)
       command = finish_run(run, left)
       return if command.nil?
 
       blocked = blocked_casks(casks, left | left.flat_map { |name| run_dependencies.fetch(name, []) })
       return command if blocked.empty?
 
-      "#{command}\n  #{cask_command(verb, blocked.keys, named:, flags:)}"
+      "#{command}\n  #{cask_command(verb, blocked.keys, flags:)}"
     end
 
     # The `run`'s command for the formulae given to it that are among
@@ -1234,9 +1225,8 @@ module Timed
       shell_command(["brew", *run.command, *roots]) if roots.any?
     end
 
-    # The arguments for the `casks` to run after the formulae, as
-    # `cask_arguments` names them for the `named` arguments, leaving out, with
-    # one warning (see `finish_first`), those that need one of the
+    # The full names of the `casks` to run after the formulae, leaving out,
+    # with one warning (see `finish_first`), those that need one of the
     # `unfinished` formulae (by full name) brew didn't install that isn't
     # installed either (see `blocked_casks`), e.g. a formula whose source
     # build failed, which brew's cask installer would pour. What brew
@@ -1246,47 +1236,38 @@ module Timed
     # that finish those formulae, then the casks (see `finish_command`), so
     # the warning points to them.
     sig {
-      params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String],
+      params(verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String],
              unfinished: T::Array[String], run: Run, run_dependencies: T::Hash[String, T::Array[String]],
              merged: T::Boolean).returns(T::Array[String])
     }
-    def self.last_casks(verb, casks, named:, flags:, unfinished:, run:, run_dependencies: {}, merged: false)
+    def self.last_casks(verb, casks, flags:, unfinished:, run:, run_dependencies: {}, merged: false)
       unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
       blocked = blocked_casks(casks, unfinished)
       if blocked.any?
         opoo <<~EOS
           Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
-          #{finish_first(verb, blocked, named:, flags:, run:, merged:).join("\n")}
+          #{finish_first(verb, blocked, flags:, run:, merged:).join("\n")}
         EOS
       end
-      cask_arguments(named, casks - blocked.keys)
+      (casks - blocked.keys).map(&:full_name)
     end
 
     # How to run `casks` later, with the cask `flags` their call was given
     # (see `cask_command`).
-    sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
-    def self.later(verb, casks, named:, flags:)
+    sig { params(verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String]).returns(String) }
+    def self.later(verb, casks, flags:)
       "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with " \
-        "`#{cask_command(verb, casks, named:, flags:)}`."
+        "`#{cask_command(verb, casks, flags:)}`."
     end
 
     # The command that runs `casks` with the cask `flags` their call was
-    # given, naming each as `cask_arguments` does for the `named` arguments,
-    # each argument escaped for the shell.
-    sig { params(verb: String, casks: T::Array[Cask::Cask], named: T::Array[String], flags: T::Array[String]).returns(String) }
-    def self.cask_command(verb, casks, named:, flags:)
-      shell_command(["brew", verb, "--cask", *flags, *cask_arguments(named, casks)])
+    # given, naming each by its full name, each argument escaped for the
+    # shell.
+    sig { params(verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String]).returns(String) }
+    def self.cask_command(verb, casks, flags:)
+      shell_command(["brew", verb, "--cask", *flags, *casks.map(&:full_name)])
     end
     private_class_method :cask_command
-
-    # The argument that names each of `casks` in a sub-call: the file it was
-    # loaded from if `names` gave it as a path, as `named_argv` makes it,
-    # otherwise its full name.
-    sig { params(names: T::Array[String], casks: T::Array[Cask::Cask]).returns(T::Array[String]) }
-    def self.cask_arguments(names, casks)
-      paths = named_argv(names)
-      casks.map { |cask| paths.find { |path| path == cask.sourcefile_path.to_s } || cask.full_name }
-    end
 
     sig { params(option: String).returns(String) }
     def self.option_name(option) = Homebrew::CLI::Parser.option_to_name(option.split("=", 2).fetch(0))
