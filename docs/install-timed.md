@@ -31,8 +31,9 @@ their own, in the call of the named formula, or of an earlier batch's
 dependency that needs them: one needed with options, one given to `--exclude`,
 one installed under an old name (which Homebrew migrates) and an outdated one
 that isn't linked into `opt` (which `brew upgrade` would mark as installed on
-request), that was built as a bottle (which `brew upgrade` would build again),
-that was installed from another tap (which `brew upgrade` would upgrade from
+request), that was unlinked and Homebrew would link (which `brew upgrade` would
+keep unlinked), that was built as a bottle (which `brew upgrade` would build
+again), that was installed from another tap (which `brew upgrade` would upgrade from
 that tap, and `brew install` refuses to replace) or that was installed through
 an alias whose target has since changed (which `brew upgrade` would replace
 with that target). No dependency gets a batch of
@@ -101,14 +102,13 @@ says so as it exits: each batch's `brew install` does, so the command doesn't
 say it again; with `--dry-run`, or with nothing to run, it does.
 
 Like `brew install`, even with `--dry-run`, Homebrew's check marks a named
-formula that is already installed as installed on request, which rewrites its
-install receipt without the build times; the command then writes them back as
-they were, unless `--no-stamp-receipts` is given. Relative paths to formula
-files are passed on as absolute paths, as Homebrew runs from the home
-directory. A bottle file is loaded from that file, as `brew install` loads it
-(even with `$HOMEBREW_FORBID_PACKAGES_FROM_PATHS`), and passed on as its
-absolute path, so Homebrew installs that bottle, as `brew install` would. If
-the file is gone once the run is confirmed, the command stops before
+formula that is already installed as installed on request (not with
+`--as-dependency`), which rewrites its install receipt without the build
+times; the command then writes them back as they were, unless
+`--no-stamp-receipts` is given. A bottle file is loaded from that file, as
+`brew install` loads it, and passed on as its absolute path, as Homebrew runs
+from the home directory, so Homebrew installs that bottle, as `brew install`
+would. If the file is gone once the run is confirmed, the command stops before
 installing anything, rather than install the formula by name, which may pour
 another bottle. `--interactive` can't be used, as it needs a terminal: use
 `brew install --interactive` instead. Casks are installed too, before or after

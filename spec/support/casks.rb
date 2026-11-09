@@ -25,7 +25,7 @@ module TimedCaskHelper
   end
 
   # The cask `token` at `latest` with `stanzas`, downloaded from `url`, loaded
-  # from a file and then loadable by its token (so `Cask::CaskLoader.for` must
+  # from a file and then loadable by its token (so `Cask::CaskLoader.loader_for` must
   # call the original for anything else), and installed at
   # `installed_version` (not when nil) with `installed_stanzas`.
   sig {
@@ -41,7 +41,7 @@ module TimedCaskHelper
     end
     path = mktmpdir/"#{token}.rb"
     path.write(cask_source(token, latest, stanzas, url:))
-    cask = Cask::CaskLoader.load(path)
+    cask = Cask::CaskLoader.from_path(path)
     stub_cask_loader(cask)
     cask
   end

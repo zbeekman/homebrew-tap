@@ -94,7 +94,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
 
   before do
     allow(Formulary).to receive(:loader_for).and_call_original
-    allow(Cask::CaskLoader).to receive(:for).and_call_original
+    allow(Cask::CaskLoader).to receive(:loader_for).and_call_original
     allow(Timed::Command).to receive(:auto_update)
     allow(Timed::Command).to receive(:brew) do |_env, argv|
       brew_calls << argv
@@ -331,13 +331,15 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "leaves to brew an outdated dependency that `brew upgrade` would install differently: one not linked " \
-       "into `opt`, or built as a bottle, which it would build again" do
+       "into `opt`, one not linked that brew links as a dependency, or one built as a bottle, which it would " \
+       "build again" do
       stub_formula("unlinked", "1.0")
       FileUtils.rm HOMEBREW_PREFIX/"opt/unlinked"
+      stub_formula("hidden", "1.0", linked: false)
       stub_formula("bottle", "1.0")
       tab = HOMEBREW_CELLAR/"bottle/1.0/INSTALL_RECEIPT.json"
       tab.write(JSON.generate(JSON.parse(tab.read).merge("built_as_bottle" => true)))
-      stub_formula("app", deps: %w[unlinked bottle])
+      stub_formula("app", deps: %w[unlinked hidden bottle])
       expect { run_command("--dry-run", "app") }.to output(/^==> Would install 1 formula in 1 batch/).to_stdout
     end
 
@@ -656,6 +658,12 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect([stamped, brew_calls]).to eq([{ %w[--dry-run] => after, %w[--yes] => after }, []])
     end
 
+    it "leaves an installed formula installed as a dependency with `--as-dependency`, as brew does" do
+      stub_formula("cmake", "2.0", on_request: false)
+      run_command("--dry-run", "--as-dependency", "cmake")
+      expect(JSON.parse((HOMEBREW_CELLAR/"cmake/2.0/INSTALL_RECEIPT.json").read)["installed_on_request"]).to be(false)
+    end
+
     it "warns about a receipt it can't put the build times back in, and still stops where brew stops" do
       stub_formula("cmake", "2.0", on_request: false, build_times:)
       head_only = formula("headonly") do
@@ -807,7 +815,7 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_formula("cmake")
       run_command("--yes", "--verbose", "--force", "--HEAD", "--include-test", "--as-dependency", "--overwrite",
                   "--skip-post-install", "--guess=cmake=1m", "--no-stamp-receipts", "--zap", "cmake")
-      flags = %w[--force --verbose --include-test --HEAD --skip-post-install --as-dependency --overwrite]
+      flags = %w[--force --verbose --as-dependency --include-test --HEAD --skip-post-install --overwrite]
       expect(brew_calls).to eq([["install", "--formula", "--yes", "--display-times", *flags, "cmake"]])
     end
 
@@ -1067,16 +1075,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       expect(brew_calls).to eq([])
     end
 
-    it "names a formula given as a file to `brew install` by that file, made absolute, and logs it by name",
-       :aggregate_failures do
-      dir = mktmpdir
-      (dir/"foo.rb").write("class Foo < Formula\n  url \"https://brew.sh/foo-2.0.tgz\"\nend\n")
-      Dir.chdir(dir) { run_command("--yes", "foo.rb") }
-      expect(brew_calls.last).to eq(["install", "--formula", "--yes", "--display-times",
-                                     (dir/"foo.rb").realpath.to_s])
-      expect(builds.fetch("foo").last).to include("status" => "built", "verb" => "install")
-    end
-
     it "logs each install and stamps its receipt", :aggregate_failures do
       stub_formula("cmake")
       run_command("--yes", "cmake")
@@ -1223,18 +1221,6 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
       stub_cask("iterm2", installed_stanzas: 'uninstall quit: "com.iterm2"')
       run_command("--yes", "iterm2")
       expect(brew_calls).to eq([%w[install --cask --yes iterm2]])
-    end
-
-    it "names a cask skipped without a terminal that was given as a file by that file in the command to " \
-       "install it later" do
-      allow(Timed::Casks).to receive(:terminal?).and_return(false)
-      dir = mktmpdir
-      (dir/"firefox.rb").write(cask_source("firefox", "2.0", 'pkg "Firefox.pkg"'))
-      path = Regexp.escape((dir/"firefox.rb").realpath.to_s)
-      Dir.chdir(dir) do
-        expect { run_command("--dry-run", "--cask", "--force", "firefox.rb") }
-          .to output(/^Install it later with `brew install --cask --force #{path}`\.$/).to_stderr
-      end
     end
 
     it "doesn't install a last cask that needs a formula that failed, which brew would pour for it, saying so, " \
