@@ -13,7 +13,7 @@ jobs:
       pull-requests: read
     steps:
       - name: Check commit format
-        uses: Homebrew/actions/check-commit-format@c262868c096d909fc278daa87ed9772967331ea3 # 2026.11.02.1
+        uses: Homebrew/actions/check-commit-format@63a2d4d8d4193eab3e62b1b782ff3ab8408f5b29 # 2026.11.09.1
         with:
           # The package checks manage labels for homebrew-core's autosquash
           # bot; the formula commit checks below cover what applies here.
