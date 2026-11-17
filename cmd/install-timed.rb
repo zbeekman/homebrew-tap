@@ -205,7 +205,42 @@ module Homebrew
           {}
         else
           leave = named.map(&:full_name) + exclude
-          installers.except(*exclude).transform_values { |installer| dependency_verbs(installer, leave:) }
+          # The dependencies brew would install or upgrade in `installer`'s
+          # call, as it works them out again before installing, once the
+          # bottle manifests are read (`FormulaInstaller#compute_dependencies`),
+          # each with the verb of the call that does the same apart (see
+          # `Planner.plan`'s `verbs`): a missing one, which brew installs as a
+          # dependency, and an outdated one, which brew upgrades keeping how it
+          # was installed (on request or not). Those in
+          # `leave` (full names), and any other brew installs differently on
+          # its own, are left for brew to install in `installer`'s call: one
+          # with options, one whose installed version isn't linked into `opt`
+          # or is the latest, one unlinked that brew would link (`brew upgrade`
+          # keeps it unlinked), one built as a bottle, which `brew upgrade`
+          # would build again, one installed from another tap and one installed
+          # through an alias whose target has changed, which `brew upgrade`
+          # would replace with that target. Brew upgrades an outdated one even
+          # with `$HOMEBREW_NO_INSTALL_UPGRADE` set, as does `brew upgrade`.
+          installers.except(*exclude).transform_values do |installer|
+            installer.expand_dependencies.filter_map do |dependency|
+              formula = dependency.to_formula
+              next if leave.include?(formula.full_name) || !dependency.options.empty?
+              next [formula, :dependency] unless formula.any_version_installed?
+              next if !formula.optlinked? || formula.latest_version_installed?
+
+              # `brew upgrade` keeps an unlinked keg unlinked; brew links it as
+              # a dependency if it would link a new one.
+              linked = Keg.new(Utils::Path.resolved_path(formula.opt_prefix)).linked?
+              next if !linked && FormulaInstaller.new(formula).link_keg
+
+              tab = Tab.for_formula(formula)
+              next if tab.built_bottle? || (formula.tap && tab.tap && tab.tap != formula.tap)
+              # Loaded through its keg, as `brew upgrade` loads it.
+              next if Formulary.resolve(formula.full_name).installed_alias_target_changed?
+
+              [formula, :upgrade]
+            end
+          end
         end
         scheduled = dependencies.values.flatten(1).to_h { |formula, own| [formula.full_name, [formula, own]] }
         verbs = scheduled.transform_values(&:last)
@@ -360,44 +395,6 @@ module Homebrew
 
       sig { returns(T::Hash[Symbol, T.any(T::Boolean, T::Array[String])]) }
       def installer_options = Timed::Command.installer_options(args)
-
-      # The dependencies brew would install or upgrade in `installer`'s call,
-      # as it works them out again before installing, once the bottle
-      # manifests are read (`FormulaInstaller#compute_dependencies`), each
-      # with the verb of the call that does the same apart (see
-      # `Planner.plan`'s `verbs`): a missing one, which brew installs as a
-      # dependency, and an outdated one, which brew upgrades keeping how it
-      # was installed (on request or not). Those in
-      # `leave` (full names), and any other brew installs differently on its
-      # own, are left for brew to install in `installer`'s call: one with
-      # options, one whose installed version isn't linked into `opt` or is
-      # the latest, one unlinked that brew would link (`brew upgrade` keeps
-      # it unlinked), one built as a bottle, which `brew upgrade` would
-      # build again, one installed from another tap and one installed through
-      # an alias whose target has changed, which `brew upgrade` would replace
-      # with that target. Brew upgrades an outdated one even with
-      # `$HOMEBREW_NO_INSTALL_UPGRADE` set, as does `brew upgrade`.
-      sig { params(installer: FormulaInstaller, leave: T::Array[String]).returns(T::Array[[Formula, Symbol]]) }
-      def dependency_verbs(installer, leave:)
-        installer.expand_dependencies.filter_map do |dependency|
-          formula = dependency.to_formula
-          next if leave.include?(formula.full_name) || !dependency.options.empty?
-          next [formula, :dependency] unless formula.any_version_installed?
-          next if !formula.optlinked? || formula.latest_version_installed?
-
-          # `brew upgrade` keeps an unlinked keg unlinked; brew links it as a
-          # dependency if it would link a new one.
-          linked = Keg.new(Utils::Path.resolved_path(formula.opt_prefix)).linked?
-          next if !linked && FormulaInstaller.new(formula).link_keg
-
-          tab = Tab.for_formula(formula)
-          next if tab.built_bottle? || (formula.tap && tab.tap && tab.tap != formula.tap)
-          # Loaded through its keg, as `brew upgrade` loads it.
-          next if Formulary.resolve(formula.full_name).installed_alias_target_changed?
-
-          [formula, :upgrade]
-        end
-      end
     end
   end
 end
