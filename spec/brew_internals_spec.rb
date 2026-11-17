@@ -20,8 +20,10 @@ require_relative "../lib/timed/command"
 require_relative "../lib/timed/runner"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
-# change fails here instead of during a real upgrade. When one fails, re-check
-# the `-timed` behaviour that depends on it before updating the expectation.
+# change fails here instead of during a real upgrade. When one fails, first
+# re-check the `-timed` behaviour that depends on it. Then prefer a test of the
+# behaviour itself over a pin of brew's source text wherever it is practical
+# and adds little code or verbosity; pin the new text only otherwise.
 RSpec.describe "brew internals", type: :system do
   def brew_source(path) = (HOMEBREW_LIBRARY_PATH/path).read
 
@@ -36,8 +38,8 @@ RSpec.describe "brew internals", type: :system do
   def sudo_values(path) = brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten
 
   # `stanza` is Cask DSL source: Sorbet cannot see the DSL's generated methods.
-  def artifacts(stanza)
-    Cask::Cask.new("timed-canary") do
+  def artifacts(stanza, config: nil)
+    Cask::Cask.new("timed-canary", config:) do
       version "1.0"
       sha256 :no_check
       url "file:///dev/null"
@@ -60,6 +62,28 @@ RSpec.describe "brew internals", type: :system do
     end
     Cask::Artifact::AbstractUninstall.dispatch_directives(directive_artifacts, command: SystemCommand, **options)
     calls
+  end
+
+  # `[error, warnings]` from the source-build check of `brew install argv` for
+  # a bottled and an unbottled formula, with or without the developer tools:
+  # the message of the error it raises, if any, and the warnings it prints
+  # first.
+  def build_flags_outcome(argv, developer_tools:)
+    allow(DevelopmentTools).to receive(:installed?).and_return(developer_tools)
+    allow(Homebrew::EnvConfig).to receive(:developer?).and_return(false)
+    # RuboCop's project index only sees this tap, so it takes brew's
+    # `InstallCmd` for a typo of `InstallTimed`.
+    command = Homebrew::Cmd::InstallCmd.new([*argv, "timed-canary"]) # rubocop:disable Lint/NameTypo
+    warnings = []
+    allow(command).to receive(:opoo) { |message| warnings << message }
+    allow(command).to receive(:puts)
+    error = begin
+      command.check_build_flags([true, false].map { |bottled| instance_double(Formula, bottled?: bottled) })
+      nil
+    rescue BuildFlagsError => e
+      e.message
+    end
+    [error, warnings]
   end
 
   describe "tap commands" do
@@ -202,8 +226,18 @@ RSpec.describe "brew internals", type: :system do
         .to include("return if altname.to_s.casecmp(file.basename.to_s)&.zero?")
     end
 
-    it "is a no-op on Linux" do
-      expect(brew_source("extend/os/linux/cask/artifact/relocated.rb")).not_to match(/command\.run|\bsuper\b/)
+    it "runs commands only on macOS, so it is a no-op on Linux" do
+      file = mktmpdir/"Foo.app"
+      file.mkpath
+      ran = []
+      [:run, :run!].each do |method|
+        allow(SystemCommand).to receive(method) do |executable|
+          ran << executable
+          instance_double(SystemCommand::Result, stdout: "")
+        end
+      end
+      artifacts('app "Foo.app"').to_a.fetch(0).add_altname_metadata(file, Pathname("Bar.app"), command: SystemCommand)
+      expect(ran.any?).to be(OS.mac?), "`OS.mac?` is #{OS.mac?}, but it ran #{ran.inspect}"
     end
   end
 
@@ -357,25 +391,34 @@ RSpec.describe "brew internals", type: :system do
 
   describe "`install --force` over an existing bundle" do
     it "fails without `force` and otherwise deletes the target, with permission recovery" do
-      body = brew_source("cask/artifact/moved.rb")[/^      def move\(.*?^      end$/m]
-      lines = body.lines.map(&:strip)
-      message = "raise CaskError, \"\#{message}.\""
-      kept = ["target.parent.writable?", message, "delete(target", "gain_permissions_remove"]
-      expected = [
-        "if target.parent.writable? && !force",
-        "Utils.gain_permissions_remove(target, command:)",
-        "#{message} if !force && !adopt",
-        "delete(target, force:, successor:, command:)",
-      ]
-      expect(lines.select { |line| kept.any? { |part| line.include?(part) } }).to eq(expected)
+      app = artifacts('app "Foo.app"', config: Cask::Config.new(explicit: { appdir: mktmpdir })).to_a.fetch(0)
+      removed = []
+      allow(Cask::Utils).to receive(:gain_permissions_remove).and_wrap_original do |remove, path, **options|
+        removed << path
+        remove.call(path, **options)
+      end
+      outcomes = [false, true].to_h do |force|
+        [app.source, app.target].each { |bundle| (bundle/"Contents").mkpath }
+        removed.clear
+        raised = begin
+          app.install_phase(force:, command: NeverSudoSystemCommand)
+          false
+        rescue Cask::CaskError
+          true
+        end
+        [force, [raised, removed.dup]]
+      end
+      expect(outcomes).to eq(false => [true, []], true => [false, [app.target]])
     end
 
     it "is reached through the `force` that `brew install` passes to the cask installer" do
-      block = brew_source("cmd/install.rb")[/Cask::Installer\.new\(.*?^                \)/m]
+      # One entry per call, in `#fetch_installers` then `#install_casks`.
+      calls = brew_source("cmd/install.rb").scan(/Cask::Installer\.new\(\n.*?^ +\)$/m)
       installer = brew_source("cask/installer.rb")
-      expect([block.match?(/^\s+force:\s+args\.force\?,$/), installer.include?("force: force?, predecessor:"),
+      expect([calls.map { |call| call.match?(/^\s+force:\s+args\.force\?,$/) },
+              installer.include?("force: force?, predecessor:"),
               brew_source("cask/artifact/moved.rb").include?("move(adopt:, auto_updates:, force:,")])
-        .to eq([true, true, true])
+        .to eq([[true, true], true, true])
     end
   end
 
@@ -733,6 +776,8 @@ RSpec.describe "brew internals", type: :system do
 
   describe "`brew install`" do
     let(:install) { brew_source("cmd/install.rb") }
+    # `#run` reads `--dry-run` once, into this local.
+    let(:dry_run_locals) { install.scan(/^ +dry_run = .*$/).map(&:strip) }
 
     it "auto-updates first, as `brew upgrade` does, but `brew reinstall` doesn't" do
       commands = brew_source("utils/auto-update.sh")[/^  AUTO_UPDATE_COMMANDS=\(\n(.*?)^  \)$/m, 1].to_s.split
@@ -741,7 +786,8 @@ RSpec.describe "brew internals", type: :system do
     end
 
     it "installs the taps of the names it is given, then loads every name before it installs anything" do
-      expect([install.include?("tap&.ensure_installed!"),
+      tap_lookup = "(Tap.with_formula_name(name) || Tap.with_cask_token(name))&.first&.ensure_installed!"
+      expect([install.include?(tap_lookup),
               install.include?("args.named.to_formulae_and_casks(method: :bottle, warn: false)")]).to eq([true, true])
     end
 
@@ -749,11 +795,11 @@ RSpec.describe "brew internals", type: :system do
        "`--dry-run`" do
       ask_formulae = brew_source("install.rb")[/^      def ask_formulae\(.*?^      end$/m].to_s
       prompt_check = "return if prompt && !formulae_ask_prompt_needed?(formulae_installer, dependants)"
-      expect([install.include?("ask = !args.no_ask? && !args.dry_run?"),
+      expect([dry_run_locals, install.include?("ask = !args.no_ask? && !dry_run"),
               install.match?(/dependants = Upgrade\.dependants\(\n\s+installed_formulae,\n\s+flags:/),
               install.match?(/Install\.ask_formulae\(\n\s+formulae_installer,\n\s+dependants,\n\s+flags:/),
               ask_formulae.include?('action: "installation")'), ask_formulae.include?(prompt_check)])
-        .to eq([true, true, true, true, true])
+        .to eq([["dry_run = args.dry_run?"], true, true, true, true, true])
     end
 
     it "builds every named formula from source with `--build-from-source`, `--HEAD` or `--build-bottle`" do
@@ -762,12 +808,16 @@ RSpec.describe "brew internals", type: :system do
     end
 
     it "stops before it installs anything without build tools for a source build, or with `--env`" do
-      lines = ["unless DevelopmentTools.installed?", 'build_flags << "--HEAD" if args.HEAD?',
-               'build_flags << "--build-bottle" if args.build_bottle?',
-               'build_flags << "--build-from-source" if args.build_from_source?',
-               "raise BuildFlagsError.new(build_flags, bottled: formulae.all?(&:bottled?)) if build_flags.present?"]
+      # `--HEAD` with each of the other two (which conflict), given reversed so
+      # the error shows the order brew lists them in.
+      flag_pairs = [%w[--HEAD --build-bottle], %w[--HEAD --build-from-source]]
+      outcomes = [[], *flag_pairs.map(&:reverse)].to_h do |argv|
+        [argv, build_flags_outcome(argv, developer_tools: false)]
+      end
+      raised = flag_pairs.to_h { |flags| [flags.reverse, [BuildFlagsError.new(flags, bottled: false).message, []]] }
       expect([install.include?('odisabled "`brew install --env`", "`env :std` in specific formula files"'),
-              install.match?(/#{lines.map { |line| Regexp.escape(line) }.join("\\s+")}/)]).to eq([true, true])
+              install.match?(/^        check_build_flags\(formulae\)\n.*Install\.install_formula\?\(/m), outcomes])
+        .to eq([true, true, { [] => [nil, []], **raised }])
     end
 
     it "prints with `--dry-run` what `Install.ask_formulae` prints, which builds no installers of its own" do
@@ -776,10 +826,11 @@ RSpec.describe "brew internals", type: :system do
               ask_formulae.include?("install_formulae(formulae_installer, dry_run: true, " \
                                     "dry_run_action: dry_run_action(action))"),
               ask_formulae.match?(/Upgrade\.upgrade_dependents\(.*?dry_run:\s+true,/m),
-              install.match?(/Install\.install_formulae\(\n\s+formulae_installer,\n\s+dry_run: args\.dry_run\?,/),
-              install.match?(/dependents\(\n\s+dependants, installed_formulae,\n.*?dry_run:\s+args\.dry_run\?,/m),
-              brew_source("install.rb").include?("Migrator.migrate_if_needed(formula, force:, dry_run:)")])
-        .to eq([true, true, true, true, true, true])
+              install.match?(/Install\.install_formulae\(\n\s+formulae_installer,\n\s+dry_run:,$/),
+              install.match?(/dependents\(\n\s+dependants, installed_formulae,\n[^)]*?^\s+dry_run:,$/),
+              brew_source("install.rb").include?("Migrator.migrate_if_needed(formula, force:, dry_run:)"),
+              dry_run_locals])
+        .to eq([true, true, true, true, true, true, ["dry_run = args.dry_run?"]])
     end
 
     it "leaves out a formula it can't install with an error and installs the rest, under `--yes`" do
@@ -845,15 +896,32 @@ RSpec.describe "brew internals", type: :system do
       body.lines.map(&:strip).reject { |line| line.empty? || line.start_with?("#") }
     end
 
-    it "are, in `prelude_fetch`, the deprecation and forbidden checks, then fetching the bottle manifest, " \
-       "then the downloads" do
-      expect(installer_statements("prelude_fetch")).to eq([
-        "unless @ran_prelude_fetch_metadata", "deprecate_disable_type = DeprecateDisable.type(formula)",
-        "if deprecate_disable_type.present?",
-        "message = \"\#{formula.full_name} has been \#{DeprecateDisable.message(formula)}\"",
-        "case deprecate_disable_type", "when :deprecated", "opoo message", "when :disabled", "if force?",
-        "opoo message", "else", "GitHub::Actions.puts_annotation_if_env_set!(:error, message)",
-        "raise CannotInstallFormulaError, message", "end", "end", "end",
+    it "are, in `prelude_fetch`, even with `metadata_only`, a warning for a deprecated formula, and for a " \
+       "disabled one with `force`, which without it raises `CannotInstallFormulaError`" do
+      deprecated = formula("deprecated") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/deprecated-1.0.tgz"
+        deprecate! date: "2020-01-01", because: :unmaintained
+      end
+      disabled = formula("disabled") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/disabled-1.0.tgz"
+        disable! date: "2020-01-01", because: :unmaintained
+      end
+      check = ->(checked, force) { FormulaInstaller.new(checked, force:).prelude_fetch(metadata_only: true) }
+      message = ->(checked) { "#{checked.full_name} has been #{DeprecateDisable.message(checked)}" }
+      aggregate_failures do
+        expect { check.call(deprecated, false) }.to output("Warning: #{message.call(deprecated)}\n").to_stderr
+        expect { check.call(disabled, true) }.to output("Warning: #{message.call(disabled)}\n").to_stderr
+        expect { check.call(disabled, false) }.to raise_error(CannotInstallFormulaError, message.call(disabled))
+      end
+    end
+
+    it "are, in `prelude_fetch`, the deprecation checks, then the forbidden checks, then fetching the bottle " \
+       "manifest, then the downloads" do
+      statements = installer_statements("prelude_fetch")
+      checks = ["unless @ran_prelude_fetch_metadata", "deprecate_disable_type = DeprecateDisable.type(formula)"]
+      after_checks = [
         "forbidden_tap_check(formula_only: true)", "forbidden_formula_check(formula_only: true)",
         "fetch_bottle_tab(enqueue: true) if pour_bottle?", "fetch_fetch_deps unless ignore_deps?",
         "@ran_prelude_fetch_metadata = true", "end", "return if metadata_only || @ran_prelude_fetch",
@@ -861,7 +929,17 @@ RSpec.describe "brew internals", type: :system do
         "elsif formula.loaded_from_api?",
         "Homebrew::API::Formula.source_download(formula, download_queue:, enqueue: true)", "end",
         "@ran_prelude_fetch = true"
-      ])
+      ]
+      # Between them, only the deprecation checks, which the example above tests.
+      deprecation_checks = [/\A(?:end|else|opoo message)\z/, /\A(?:case|if) deprecate_disable_type\b/,
+                            /\Amessage = /, /\Awhen :(?:deprecated|disabled)\b/,
+                            /\Araise CannotInstallFormulaError, message\z/,
+                            /\AGitHub::Actions\.puts_annotation_if_env_set!\(:error, message\)\z/]
+      others = statements[checks.length...-after_checks.length].to_a.reject do |statement|
+        deprecation_checks.any? { |check| check.match?(statement) }
+      end
+      expect([statements.first(checks.length), others, statements.last(after_checks.length)])
+        .to eq([checks, [], after_checks])
     end
 
     it "are, in `prelude`, reading the bottle manifest, then checking dependencies, licence, tap, formula " \
@@ -1005,11 +1083,13 @@ RSpec.describe "brew internals", type: :system do
       expect(steps.map { |step| install.index(step) }.then { |at| at.all? && at == at.sort }).to be(true)
     end
 
-    it "never warns that building from source isn't supported, as it raises first without the developer tools" do
-      build_flags = install[/^        build_flags = \[\]\n(.*?)^        end$/m, 1].to_s
-      expect([build_flags.lines.first&.strip, build_flags.include?("raise BuildFlagsError"),
-              install.include?("if build_flags.present? && !Homebrew::EnvConfig.developer?")])
-        .to eq(["unless DevelopmentTools.installed?", true, true])
+    it "warns that building from source isn't supported only with the developer tools, as it raises first " \
+       "without them" do
+      outcomes = [true, false].to_h do |developer_tools|
+        [developer_tools, build_flags_outcome(["--build-from-source"], developer_tools:)]
+      end
+      expect(outcomes).to eq(true  => [nil, ["building from source is not supported!"]],
+                             false => [BuildFlagsError.new(["--build-from-source"], bottled: false).message, []])
     end
 
     # The keywords given to the call that starts with `call` in `source`, up
