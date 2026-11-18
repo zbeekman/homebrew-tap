@@ -8,6 +8,7 @@ require "cmd/upgrade"
 require "formula_installer"
 require "install"
 require "minimum_version"
+require "stringio"
 require "trust"
 require_relative "../lib/timed/build_log"
 require_relative "../lib/timed/command"
@@ -240,17 +241,25 @@ module Homebrew
       # dependencies only count for formulae built from source that aren't
       # current. Outdated dependencies, other than pinned ones, get their own
       # entry, so the keys are the formulae to upgrade. Formulae brew would
-      # refuse or fail (e.g. needing a newer pinned dependency or one that
-      # can't be loaded) are left out, for its preview to report; brew carries
-      # on with the rest.
+      # refuse or fail (e.g. needing a newer pinned dependency, one that
+      # can't be loaded, or with an unsatisfied requirement) are left out, for
+      # its preview to report; brew carries on with the rest.
       sig { params(roots: T::Array[Formula]).returns(T::Hash[String, T::Array[Formula]]) }
       def dependencies(roots)
         needs = T.let({}, T::Hash[String, T::Array[Formula]])
         queue = roots.reject do |root|
           installer(root).check_install_sanity
+          # Brew's check of the requirements, as in the dry-run pass of
+          # `brew upgrade`, which leaves the formula out if one fails. The
+          # preview reports it, so the check's own message is dropped.
+          stderr = $stderr
+          $stderr = StringIO.new
+          installer(root).compute_dependencies
           false
-        rescue CannotInstallFormulaError, FormulaUnavailableError
+        rescue CannotInstallFormulaError, FormulaUnavailableError, UnsatisfiedRequirements
           true
+        ensure
+          $stderr = stderr if stderr
         end
         while (formula = queue.shift)
           next if needs.key?(formula.full_name)

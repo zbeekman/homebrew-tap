@@ -335,6 +335,9 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
           ==> Would reinstall 2 formulae:
           cmake  2.0
           new    2.0
+          ==> 2 homebrew/core formulae that would build from source
+          cmake
+          new
           ==> Would reinstall 2 formulae in 1 batch, estimated 8m20s
           ==> Batch 1 of 1: 8m20s
           cmake                        build     3m20s

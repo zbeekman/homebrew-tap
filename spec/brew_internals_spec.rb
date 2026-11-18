@@ -1115,9 +1115,35 @@ RSpec.describe "brew internals", type: :system do
       in_order = ->(source, steps) { steps.map { |step| source.index(step) }.then { |at| at.all? && at == at.sort } }
       expect([in_order.call(installers, ["download_queue.fetch(only: Resource::BottleManifest",
                                          "fi.determine_bottle_tab_attributes"]),
-              in_order.call(upgrade, ["Upgrade.formula_installers(",
-                                      "Install.formulae_ask_prompt_needed?(context.formulae_installer"])])
+              in_order.call(upgrade, ["Upgrade.formula_installers(", "Install.formulae_ask_prompt_needed?("])])
         .to eq([true, true])
+    end
+
+    it "decides whether to ask only from the formulae that pass its dry-run, not one with an unsatisfied " \
+       "requirement" do
+      # `UpgradeCmd` is brew's command, not a typo of `UpgradeTimed`.
+      # rubocop:disable Lint/NameTypo
+      cmd = Homebrew::Cmd::UpgradeCmd.new(["--dry-run", "testball"])
+      context = Homebrew::Cmd::UpgradeCmd::FormulaeUpgradeContext
+      # rubocop:enable Lint/NameTypo
+      formula = formula("testball") do
+        T.bind(self, T.class_of(Formula))
+        url "https://brew.sh/testball-0.2"
+      end
+      old_keg = HOMEBREW_CELLAR/"testball/0.1"
+      old_keg.mkpath
+      allow(formula).to receive_messages(optlinked?: true, opt_prefix: old_keg)
+      installer = FormulaInstaller.new(formula)
+      allow(installer).to receive(:compute_dependencies).and_raise(UnsatisfiedRequirements.new([]))
+      allow(cmd).to receive(:formulae_upgrade_context).and_return(
+        context.new(
+          formulae_to_install: [formula],
+          formulae_installer:  [installer],
+          dependants:          Homebrew::Upgrade::Dependents.new(upgradeable: [], pinned: [], skipped: []),
+        ),
+      )
+      expect(Homebrew::Install).to receive(:formulae_ask_prompt_needed?).with([], anything).and_return(false)
+      expect { cmd.upgrade_outdated_formulae!([]) }.to output(/testball/).to_stderr
     end
   end
 
