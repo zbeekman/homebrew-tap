@@ -29,11 +29,12 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
   # bottle manifest is never downloaded; its tab lists `bottle_deps`, with
   # the version each needs at least.
   def stub_formula(name, installed_version = "1.0", latest: "2.0", deps: [], build_deps: [], keg_only: false,
-                   bottled: false, bottle_deps: {})
+                   bottled: false, bottle_deps: {}, requirements: [])
     formula = formula(name) do
       T.bind(self, T.class_of(Formula))
       url "https://brew.sh/#{name}-#{latest}.tgz"
       deps.each { |dep| depends_on dep }
+      requirements.each { |requirement| depends_on requirement }
       build_deps.each { |dep| depends_on dep => :build }
       keg_only "it is a test" if keg_only
       TimedBottleHelper.bottle(self) if bottled
@@ -299,6 +300,21 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
       stub_formula("other")
       expect { run_command("--dry-run", "app", "other") }
         .to output(/\A==> Would upgrade 1 formula in 1 batch.*^other /m).to_stdout
+    end
+
+    it "doesn't plan a formula with an unsatisfied requirement, nor its outdated dependencies, which the " \
+       "preview reports" do
+      unsatisfied = Class.new(Requirement) do
+        fatal true
+        satisfy(build_env: false) { false }
+      end
+      stub_formula("lib")
+      stub_formula("app", deps: %w[lib], requirements: [unsatisfied])
+      stub_formula("other")
+      expect do
+        expect { run_command("--dry-run", "app", "other") }
+          .to output(/\A==> Would upgrade 1 formula in 1 batch.*^other /m).to_stdout
+      end.not_to output.to_stderr
     end
 
     it "doesn't plan a formula that needs a newer version of a pinned dependency, which the preview reports" do
