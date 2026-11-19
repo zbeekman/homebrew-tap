@@ -443,15 +443,44 @@ RSpec.describe "brew internals", type: :system do
   describe "uninstalling a cask" do
     it "runs the `uninstall_phase` of every artifact but `uninstall` and `zap`, whose directives it dispatches " \
        "around them, on upgrade and on reinstall" do
-      body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
-      phase = "artifact.uninstall_phase(command: @command, verbose: verbose?, skip: clear, force: force?, successor:,"
-      filters = /\b(?:grep|grep_v|select|reject|filter_map|partition|next|each)\b|_phase\(/
-      expect(body.lines.map(&:strip).grep(filters))
-        .to eq(["directive_artifacts = [*artifacts.grep(Artifact::Uninstall), *zap_stanzas]",
-                "artifacts.grep_v(Artifact::AbstractUninstall).select { |artifact| " \
-                "artifact.respond_to?(:uninstall_phase) },",
-                ").partition do |artifact|", "preflight.each do |artifact|", phase,
-                "removable.each do |artifact|", phase])
+      all = artifacts(<<~RUBY, config: Cask::Config.new(explicit: { appdir: mktmpdir }))
+        app "Foo.app"
+        binary "foo"
+        uninstall_preflight_steps { touch "a" }
+        uninstall_postflight_steps { touch "b" }
+        uninstall quit: "com.foo"
+        zap trash: "~/Foo"
+      RUBY
+      calls = []
+      all.select { |artifact| artifact.respond_to?(:uninstall_phase) }.each do |artifact|
+        allow(artifact).to receive(:uninstall_phase) do |**options|
+          calls << [artifact.class.dsl_key, options.slice(:skip, :force, :successor, :upgrade, :reinstall)]
+        end
+      end
+      allow(Cask::Artifact::AbstractUninstall).to receive(:dispatch_directives) do |stanzas, **options|
+        calls << [stanzas.map { |stanza| stanza.class.dsl_key }, options.slice(:deferred, :upgrade, :reinstall)]
+      end
+      cask = all.to_a.fetch(0).cask
+      # As `start_upgrade` (without `--force`) and `zap` (`reinstall --zap`,
+      # always forced by `uninstall_existing_cask`) call it.
+      actual = { upgrade: [], reinstall: all.grep(Cask::Artifact::Zap) }.to_h do |mode, zap_stanzas|
+        calls.clear
+        installer = Cask::Installer.new(cask, force: mode == :reinstall, upgrade: mode == :upgrade,
+                                              reinstall: mode == :reinstall)
+        if mode == :upgrade
+          installer.uninstall_artifacts(successor: cask, quit: true)
+        else
+          installer.uninstall_artifacts(clear: true, zap_stanzas:)
+        end
+        [mode, calls.dup]
+      end
+      expected = { upgrade: [:uninstall], reinstall: [:uninstall, :zap] }.to_h do |mode, stanzas|
+        flags = { upgrade: mode == :upgrade, reinstall: mode == :reinstall }
+        phase = { skip: flags[:reinstall], force: flags[:reinstall], successor: (cask if flags[:upgrade]), **flags }
+        [mode, [[:uninstall_preflight_steps, phase], [stanzas, flags], [:app, phase], [:binary, phase],
+                [:uninstall_postflight_steps, phase], [stanzas, { deferred: true }]]]
+      end
+      expect(actual).to eq(expected)
     end
 
     it "has a `post_uninstall_phase` only in `uninstall`, which runs its deferred directives" do
