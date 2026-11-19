@@ -18,14 +18,12 @@ module Timed
     # Paints `text` in `style`, one of the bands of `Plot.band`, the colours of
     # `STATUS_STYLES`, `:italic`, `:bold` or `:underline`, through Homebrew's
     # `Tty`, so colour is on only when Homebrew's own output would be coloured.
-    PAINT = T.let(
-      lambda do |text, style|
-        next text unless Tty.color?
+    paint = lambda do |text, style|
+      next text unless Tty.color?
 
-        "#{Tty.public_send(style)}#{text}#{Tty.reset}"
-      end.freeze,
-      Plot::Paint,
-    )
+      "#{Tty.public_send(style)}#{text}#{Tty.reset}"
+    end
+    PAINT = T.let(paint.freeze, Plot::Paint)
 
     private
 
