@@ -35,14 +35,16 @@ module Timed
     Succeeded = T.type_alias { T.proc.params(formula: Formula).returns(T.proc.params(since: Time).returns(T::Boolean)) }
 
     # Whether brew installed a formula: its version is installed.
-    INSTALLED = T.let(->(formula) { ->(_since) { formula.latest_version_installed? } }.freeze, Succeeded)
+    installed = ->(formula) { ->(_since) { formula.latest_version_installed? } }
+    INSTALLED = T.let(installed.freeze, Succeeded)
 
     # Whether brew reinstalled a formula: a failed reinstall leaves the old
     # keg, and its receipt, in place.
-    REINSTALLED = T.let(lambda do |formula|
+    reinstalled = lambda do |formula|
       before = Receipts.receipt_stat(formula)
       ->(since) { Receipts.installed_since?(formula, since, before:) }
-    end.freeze, Succeeded)
+    end
+    REINSTALLED = T.let(reinstalled.freeze, Succeeded)
 
     # Runs each of `batches` of `formulae` (by full name) with
     # `brew <verb> --formula --yes --display-times <flags> <names>`, each name

@@ -26,7 +26,8 @@ module Timed
 
     # An LLM's estimate: its answers are clamped to this, so the log keeps
     # nothing else.
-    ESTIMATE_SECONDS = T.let(1..(48 * 60 * 60), T::Range[Integer])
+    estimate_seconds = 1..(48 * 60 * 60)
+    ESTIMATE_SECONDS = T.let(estimate_seconds.freeze, T::Range[Integer])
 
     POURED_ESTIMATE = 15.0
     NO_HISTORY_ESTIMATE = 600.0
@@ -236,7 +237,8 @@ module Timed
 
     sig { params(data: T.nilable(Database)).void }
     def initialize(data = nil)
-      @data = T.let(data || { "schema_version" => SCHEMA_VERSION, "packages" => {} }, Database)
+      data ||= { "schema_version" => SCHEMA_VERSION, "packages" => {} }
+      @data = T.let(data, Database)
     end
 
     sig { returns(Database) }

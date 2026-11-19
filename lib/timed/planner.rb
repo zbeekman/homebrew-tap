@@ -223,7 +223,8 @@ module Timed
     def self.split(verb, label, group, estimates, keg_only, verbs)
       batches = T.let([], T::Array[Batch])
       current = T.let([], T::Array[String])
-      reason = T.let((label == "last") ? "--last" : nil, T.nilable(String))
+      reason = T.let(nil, T.nilable(String))
+      reason = "--last" if label == "last"
 
       group.each do |name|
         # The verb shows where only it changes.
