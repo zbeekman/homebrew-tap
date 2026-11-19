@@ -50,14 +50,6 @@ jobs:
           key: ${{ matrix.os }}-rubygems-${{ steps.set-up-homebrew.outputs.gems-hash }}
           restore-keys: ${{ matrix.os }}-rubygems-
 
-      # For Homebrew/brew@ae73120245's `libexec`; remove once brew creates it.
-      - name: Create `libexec` in a `/usr/local` prefix
-        if: runner.os == 'macOS'
-        run: |
-          if [[ "$(brew --prefix)" == /usr/local ]]; then
-            sudo install -d -o "${USER}" -g admin -m 775 /usr/local/libexec
-          fi
-
       - run: brew test-bot --only-cleanup-before
 
       - run: brew test-bot --only-setup
