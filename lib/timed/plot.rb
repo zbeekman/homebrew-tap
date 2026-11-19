@@ -125,10 +125,8 @@ module Timed
     )
     # The steps between the ticks of a linear axis, the smallest of them that
     # is a multiple of the bin width and leaves room for the labels.
-    LINEAR_TICK_STEPS = T.let(
-      (LINEAR_WIDTHS + [15.0, 30.0, 900.0, 1800.0, 10_800.0, 21_600.0, 43_200.0]).sort.freeze,
-      T::Array[Float],
-    )
+    linear_tick_steps = (LINEAR_WIDTHS + [15.0, 30.0, 900.0, 1800.0, 10_800.0, 21_600.0, 43_200.0]).sort
+    LINEAR_TICK_STEPS = T.let(linear_tick_steps.freeze, T::Array[Float])
     # The label of the mark at `GREEN_UP_TO` in the x axis.
     MARK_LABEL = "75s batch split"
     # The bit of each dot of a braille character, by row from the top, then
