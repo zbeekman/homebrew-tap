@@ -1320,11 +1320,12 @@ RSpec.describe "brew internals", type: :system do
       expect(parsed(["==> Pouring #{bottle}"])).to eq(%w[foo])
     end
 
-    it "include the log a failed build prints the end of, in a directory named after the formula",
-       :aggregate_failures do
+    it "include the log a failed build prints the end of, in a directory named after the formula, before brew " \
+       "appends to its file", :aggregate_failures do
       expect(brew_source("formula.rb")).to include(
         "log_filename = format(\"\#{logs}/\#{active_log_prefix}%02<exec_count>d.%<cmd_base>s.log\",",
         "puts \"Last \#{log_lines} lines from \#{log_filename}:\"",
+        "Kernel.system \"/usr/bin/tail\", \"-n\", log_lines.to_s, log_filename\n        end\n        log.puts\n",
       )
       expect(parsed(["Last 15 lines from #{foo.logs}/01.make.log:", "make: *** Error 1"])).to eq(%w[foo])
     end
@@ -1368,7 +1369,8 @@ RSpec.describe "brew internals", type: :system do
     allow(Homebrew::Diagnostic).to receive(:support_tiers).and_return([])
     # As on a Tier 1 host, which has somewhere to report issues.
     stub_const("OS::ISSUES_URL", "https://docs.brew.sh/Troubleshooting")
-    log = ["Last 15 lines from #{foo.logs}/01.make.log:", "2026-09-30 10:00:00 +0000", "make", "make: *** Error 1"]
+    log = ["Last 15 lines from #{foo.logs}/01.make.log:", "2026-09-30 10:00:00 +0000", "make", "",
+           "Warning: jobserver unavailable", "make: *** Error 1"]
     unsupported = OS::ThirdPartyHomebrew.new(tier: :unsupported)
     provider = OS::ThirdPartyHomebrew.new(issues_url: "https://example.com/issues")
     # Brew's own checks warn of the host's findings first, only those that
@@ -1383,7 +1385,17 @@ RSpec.describe "brew internals", type: :system do
     cases = { "Tier 1, official tap" => [CoreTap.instance, false, true, nil], "Tier 1" => [foo.tap, false, true, nil],
               "Tier 3" => [foo.tap, false, false, nil], "unsupported" => [foo.tap, false, true, unsupported],
               "--HEAD" => [foo.tap, true, true, nil], "provider" => [foo.tap, false, true, provider] }
-    problems = cases.transform_values do |(tap, head, default_prefix, third_party)|
+    file = foo.logs/"01.make.log"
+    # Each with the log file as `Formula#system` leaves it, the log then a
+    # blank line and the build's configuration, and without it.
+    problems = cases.keys.product([true, false]).to_h do |name, with_file|
+      tap, head, default_prefix, third_party = cases.fetch(name)
+      if with_file
+        file.dirname.mkpath
+        file.write([*log.drop(1), "", "HOMEBREW_VERSION: 5.0.0", ""].join("\n"))
+      else
+        FileUtils.rm_f file
+      end
       allow(Homebrew).to receive(:default_prefix?).and_return(default_prefix)
       allow(OS).to receive(:third_party_homebrew).and_return(third_party)
       allow(foo).to receive_messages(tap:, head?: head)
@@ -1392,9 +1404,13 @@ RSpec.describe "brew internals", type: :system do
       output = StringIO.new
       [error, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
       error.dump
-      Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] }).dig("foo", "problems")
+      parsed = Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] })
+      ["#{name}#{", with its log file" if with_file}", parsed.dig("foo", "problems")]
     end
-    expect(problems).to eq(cases.transform_values { [log.join("\n")] })
+    # Without it, the log's own warning after a blank line ends it.
+    expect(problems).to eq(problems.to_h do |key, _|
+      [key, [(key.end_with?(", with its log file") ? log : log.first(3)).join("\n")]]
+    end)
   end
 
   describe "`Tty`, which paints `brew build-times stats`, `histogram`, `runs` and `run`" do

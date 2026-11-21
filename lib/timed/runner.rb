@@ -686,19 +686,24 @@ module Timed
     # an error naming the formula (`BuildError#dump`), which does the same.
     PROBLEM = %r{
       \A(?:Error:(?:\s(?<failed>\S+)\s\S+\sdid\snot\sbuild\z)?
-      |Last\s(?<tail>\d+)\slines\sfrom\s(?:.*/(?<log_name>[^/]+)/[^/]+:\z)?)
+      |Last\s(?<tail>\d+)\slines\sfrom\s(?:(?<log_path>.*/(?<log_name>[^/]+)/[^/]+):\z)?)
     }x
     STATUS = /\A(?:==>|✔︎|✘|🍺)/
     PROBLEM_LINES = 6
 
     # A log no longer than the lines brew prints is printed whole, starting
     # with the time it was written (`Formula#system`), and brew's own text
-    # may follow within the count (`BuildError#dump`): its first line, two
-    # blank lines in a row, or a warning right after a blank line, end such a
-    # log. Brew prints a blank line and then warns of the host's diagnostic
-    # findings first, which may have blank lines of their own, and only then
-    # its text about reporting the issue. `READ THIS: ` is from brew before
-    # 2026-11-19, which routes issue reports by support tier.
+    # may follow within the count (`BuildError#dump`). Brew only appends to
+    # the log file after printing it, so the printed lines that match the
+    # file's first lines are the log, and the first that doesn't ends it.
+    # Without that file (one written again since starts with another time),
+    # its first line, two blank lines in a row, or a warning right after a
+    # blank line, end such a log: brew prints a blank line and then warns of
+    # the host's diagnostic findings first, which may have blank lines of
+    # their own, and only then its text about reporting the issue. A log
+    # with a warning of its own right after a blank line is cut there.
+    # `READ THIS: ` is from brew before 2026-11-19, which routes issue
+    # reports by support tier.
     LOG_START = /\A\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}\z/
     AFTER_LOG = /
       \A(?:#{Regexp.union("READ THIS: ", "If reporting this issue", "These open issues may also help:",
@@ -745,6 +750,10 @@ module Timed
         @tail = T.let(nil, T.nilable(Integer))
         # Whether that log is printed whole, known from its first line.
         @whole_log = T.let(false, T::Boolean)
+        # The log's file, from its header, and its first lines once printed
+        # whole, if they start with the line printed first.
+        @log_path = T.let(nil, T.nilable(String))
+        @log_lines = T.let(nil, T.nilable(T::Array[String]))
         @in_times = T.let(false, T::Boolean)
         # When the first line of a formula brew names late arrived.
         @unclaimed = T.let(nil, T.nilable(Float))
@@ -794,6 +803,7 @@ module Timed
           @current = seen(named, @unclaimed || time)
           @problem = [line]
           @tail = match[:tail]&.to_i
+          @log_path = match[:log_path]
           @release = true if @tail || match[:failed]
         end
         @unclaimed = nil if @current || line.start_with?("✔︎")
@@ -848,9 +858,17 @@ module Timed
       def took_problem_line?(problem, line)
         tail = @tail
         if tail
-          @whole_log = LOG_START.match?(line) if problem.length == 1
-          log_ended = @whole_log && (AFTER_LOG.match?(line) || (problem.length > 1 && problem.fetch(-1).blank? &&
-                                                                 (line.blank? || line.start_with?("Warning: "))))
+          if problem.length == 1
+            @whole_log = LOG_START.match?(line)
+            @log_lines = (log_file_lines(line, tail) if @whole_log)
+          end
+          log_lines = @log_lines
+          log_ended = if log_lines
+            log_lines[problem.length - 1] != line
+          else
+            @whole_log && (AFTER_LOG.match?(line) || (problem.length > 1 && problem.fetch(-1).blank? &&
+                                                      (line.blank? || line.start_with?("Warning: "))))
+          end
           if tail.positive? && !STATUS.match?(line) && !log_ended
             @tail = tail - 1
             problem << line
@@ -863,6 +881,22 @@ module Timed
 
         close_problem
         false
+      end
+
+      # The first `count` lines of the log file, as `feed` reads them, if it
+      # is in brew's logs, can be read and starts with `first`, the line
+      # printed first.
+      sig { params(first: String, count: Integer).returns(T.nilable(T::Array[String])) }
+      def log_file_lines(first, count)
+        path = @log_path
+        # Only a regular file in brew's logs: another program's output may
+        # name any file, or a pipe or device, which could block.
+        return if path.nil? || !File.expand_path(path).start_with?("#{HOMEBREW_LOGS}/") || !File.file?(path)
+
+        lines = File.foreach(path).first(count).map { |raw| raw.scrub.chomp.gsub(ANSI, "") }
+        lines if lines.first == first
+      rescue SystemCallError
+        nil
       end
 
       sig { void }
