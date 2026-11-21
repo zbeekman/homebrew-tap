@@ -145,6 +145,22 @@ RSpec.describe Homebrew::Cmd::ReinstallTimed do
         [flag, "Invalid usage: `#{flag[/--\w+/]}`: No available formula with the name \"nope\"."]
       end)
     end
+
+    it "stops before it does anything without the developer tools for `--build-from-source`, as `brew reinstall` " \
+       "does, even with only casks named" do
+      stub_formula("app")
+      stub_cask("iterm2")
+      allow(DevelopmentTools).to receive(:installed?).and_return(false)
+      errors = { "formula" => %w[app iterm2], "casks" => %w[iterm2] }.transform_values do |names|
+        run_command("--yes", "--build-from-source", *names)
+        nil
+      rescue BuildFlagsError => e
+        e.message
+      end
+      expect([errors, brew_calls])
+        .to eq([{ "formula" => BuildFlagsError.new(["--build-from-source"], bottled: false).message,
+                  "casks"   => BuildFlagsError.new(["--build-from-source"]).message }, []])
+    end
   end
 
   describe "--dry-run" do

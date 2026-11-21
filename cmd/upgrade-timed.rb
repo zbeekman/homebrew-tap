@@ -58,6 +58,12 @@ module Homebrew
 
         items = named_items
         named = items.grep(Formula)
+        # Where `brew upgrade` stops before doing anything, unless only casks
+        # are named.
+        if args.build_from_source? && named.present? && !DevelopmentTools.installed?
+          raise BuildFlagsError.new(["--build-from-source"], bottled: named.all?(&:bottled?))
+        end
+
         guesses = Timed::Command.guesses(args.guess || [],
                                          resolve: ->(name) { Timed::Command.resolve("--guess", name) })
         last = (args.last || []).map { |name| Timed::Command.resolve("--last", name) }

@@ -1114,6 +1114,41 @@ RSpec.describe "brew internals", type: :system do
                              false => BuildFlagsError.new(["--build-from-source"], bottled: false).message)
     end
 
+    it "stops `brew upgrade` and `brew reinstall` the same way, with the named formulae, before they do anything, " \
+       "but `brew upgrade` not with only casks named" do
+      allow(DevelopmentTools).to receive(:installed?).and_return(false)
+      formulae = [true, false].map do |bottled|
+        named = formula("timed-canary-#{bottled}") do
+          T.bind(self, T.class_of(Formula))
+          url "https://brew.sh/timed-canary-1.0.tgz"
+        end
+        allow(named).to receive(:bottled?).and_return(bottled)
+        named
+      end
+      items = { "formulae" => formulae, "casks" => [Cask::Cask.new("timed-canary")] }
+      # RuboCop's project index only sees this tap, so it takes brew's
+      # `UpgradeCmd` for a typo of `UpgradeTimed`.
+      commands = { "upgrade"   => ->(argv) { Homebrew::Cmd::UpgradeCmd.new(["--dry-run", *argv]) }, # rubocop:disable Lint/NameTypo
+                   "reinstall" => ->(argv) { Homebrew::Cmd::Reinstall.new(argv) } }
+      outcomes = commands.keys.product(items.keys).to_h do |command, kind|
+        run = commands.fetch(command).call(%w[--build-from-source timed-canary])
+        allow(run.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return(items.fetch(kind))
+        # Where `brew upgrade` goes on to the casks.
+        allow(run).to receive(:upgrade_outdated_casks!) { throw :went_on, "went on" } if command == "upgrade"
+        outcome = catch(:went_on) do
+          run.run
+          "done"
+        rescue BuildFlagsError => e
+          e.message
+        end
+        ["#{command} #{kind}", outcome]
+      end
+      error = BuildFlagsError.new(["--build-from-source"], bottled: false).message
+      expect(outcomes).to eq("upgrade formulae"   => error, "upgrade casks"   => "went on",
+                             "reinstall formulae" => error,
+                             "reinstall casks"    => BuildFlagsError.new(["--build-from-source"]).message)
+    end
+
     # The keywords given to the call that starts with `call` in `source`, up
     # to the end of the line that closes it.
     def keywords(source, call)

@@ -156,6 +156,23 @@ RSpec.describe Homebrew::Cmd::UpgradeTimed do
         .to raise_error(ArgumentError, "`--build-from-source` requires at least one formula")
     end
 
+    it "stops before it does anything without the developer tools for `--build-from-source` with a formula " \
+       "named, as `brew upgrade` does, but not with only casks named" do
+      stub_formula("app", bottled: true)
+      stub_cask("iterm2")
+      allow(DevelopmentTools).to receive(:installed?).and_return(false)
+      outcomes = { "formula" => %w[app iterm2], "casks" => %w[iterm2] }.transform_values do |names|
+        brew_calls.clear
+        run_command("--yes", "--build-from-source", *names)
+        # The calls after brew's preview.
+        [nil, brew_calls.drop(1)]
+      rescue BuildFlagsError => e
+        [e.message, brew_calls.dup]
+      end
+      expect(outcomes).to eq("formula" => [BuildFlagsError.new(["--build-from-source"]).message, []],
+                             "casks"   => [nil, [%w[upgrade --cask --yes iterm2]]])
+    end
+
     it "requires exactly one named formula for `--minimum-version`, as `brew upgrade` does" do
       expect { run_command("--minimum-version=1.0") }
         .to raise_error(UsageError, /`--minimum-version` requires exactly one formula or cask argument/)
