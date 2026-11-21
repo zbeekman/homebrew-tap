@@ -1385,8 +1385,9 @@ RSpec.describe Timed::Runner do
     end
 
     it "ends a whole short log where brew's own text starts, whatever the tier" do
-      log = ["Last 15 lines from /logs/foo/01.make:", "2026-09-30 10:00:00 +0000", "", "make", "",
-             "make: *** No rule to make target `install`.  Stop."]
+      # A warning in the log itself, not right after a blank line, is kept.
+      log = ["Last 15 lines from /logs/foo/01.make:", "2026-09-30 10:00:00 +0000", "", "make",
+             "Warning: jobserver unavailable", "make: *** No rule to make target `install`.  Stop."]
       after = {
         "official tap" => ["", "READ THIS: https://docs.brew.sh/Troubleshooting", "",
                            "These open issues may also help:"],
@@ -1395,6 +1396,10 @@ RSpec.describe Timed::Runner do
         # Tier 2 or 3 with `HOMEBREW_DEVELOPER`, where the tier notice is left out.
         "no notice"    => ["", "", "Warning: Your Xcode (26.3) is outdated.",
                            "Please update to Xcode 26.6 (or delete it).", "Xcode can be updated from the App Store."],
+        # Brew's warnings of the host's findings come first, blank lines and all.
+        "host warning" => ["", "Warning: A newer Command Line Tools release is available.", "",
+                           "Update them from Software Update in System Settings.", "",
+                           "This is a Tier 2 configuration:"],
       }
       problems = after.transform_values do |lines|
         described_class.parse(["==> Upgrading foo", *log, *lines].map { |line| ["#{line}\n", nil] })

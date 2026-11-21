@@ -208,9 +208,16 @@ RSpec.describe Homebrew::Cmd::InstallTimed do
     end
 
     it "loads the names as `brew install` does, without warnings about renamed or migrated formulae" do
-      stub_formula("cmake")
-      expect(Formulary).to receive(:factory).with("cmake", hash_including(warn: false)).and_call_original
-      run_command("--dry-run", "cmake")
+      ENV["HOMEBREW_NO_INSTALL_FROM_API"] = "1"
+      core = CoreTap.instance
+      core.formula_dir.mkpath
+      (core.formula_dir/"cmake.rb").write <<~RUBY
+        class Cmake < Formula
+          url "https://brew.sh/cmake-2.0.tgz"
+        end
+      RUBY
+      (core.path/"formula_renames.json").write(JSON.generate("old-cmake" => "cmake"))
+      expect { run_command("--dry-run", "old-cmake") }.not_to output(/renamed/).to_stderr
     end
 
     it "prints brew's plan in-process, as `brew install --dry-run` prints it, then the batches, running no brew",
