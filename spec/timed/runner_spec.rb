@@ -1384,7 +1384,46 @@ RSpec.describe Timed::Runner do
       )
     end
 
-    it "ends a whole short log where brew's own text starts, whatever the tier" do
+    it "ends a whole short log at the end of its log file, whatever it holds and brew prints after it" do
+      lines = ["2026-09-30 10:00:00 +0000", "", "make", "", "Warning: jobserver unavailable",
+               "make: *** No rule to make target `install`.  Stop."]
+      file = HOMEBREW_LOGS/"foo/01.make.log"
+      file.dirname.mkpath
+      # Brew appends a blank line and the build's configuration once it has
+      # printed the log.
+      file.write([*lines, "", "HOMEBREW_VERSION: 5.0.0", ""].join("\n"))
+      header = "Last 15 lines from #{file}:"
+      after = ["", "Warning: A newer Command Line Tools release is available.", "",
+               "Update them from Software Update in System Settings.", "", "This is a Tier 2 configuration:"]
+      printed = ["==> Upgrading foo", header, *lines, *after].map { |line| ["#{line}\n", nil] }
+      expect(described_class.parse(printed).dig("foo", "problems")).to eq([[header, *lines.last(5)].join("\n")])
+    end
+
+    it "doesn't read a log file outside brew's logs, so a whole short log ends at its own warning" do
+      lines = ["2026-09-30 10:00:00 +0000", "", "make", "", "Warning: jobserver unavailable",
+               "make: *** No rule to make target `install`.  Stop."]
+      file = HOMEBREW_TEMP/"foo/01.make.log"
+      file.dirname.mkpath
+      file.write([*lines, "", "HOMEBREW_VERSION: 5.0.0", ""].join("\n"))
+      # Named through brew's logs, which it only seems to be in.
+      header = "Last 15 lines from #{HOMEBREW_LOGS}/#{file.relative_path_from(HOMEBREW_LOGS)}:"
+      printed = ["==> Upgrading foo", header, *lines, "", "This is a Tier 2 configuration:"]
+      expect(described_class.parse(printed.map { |line| ["#{line}\n", nil] }).dig("foo", "problems"))
+        .to eq([[header, *lines.first(3)].join("\n")])
+    end
+
+    it "ends a whole short log where brew's own text starts if its log file was written again since" do
+      lines = ["2026-09-30 10:00:00 +0000", "", "make", "make: *** No rule to make target `install`.  Stop."]
+      file = HOMEBREW_LOGS/"foo/01.make.log"
+      file.dirname.mkpath
+      file.write(["2026-09-30 10:05:00 +0000", "", "make", ""].join("\n"))
+      header = "Last 15 lines from #{file}:"
+      after = ["", "Warning: A newer Command Line Tools release is available.", "", "This is a Tier 2 configuration:"]
+      printed = ["==> Upgrading foo", header, *lines, *after].map { |line| ["#{line}\n", nil] }
+      expect(described_class.parse(printed).dig("foo", "problems")).to eq([[header, *lines].join("\n")])
+    end
+
+    it "ends a whole short log where brew's own text starts, whatever the tier, without its log file" do
       # A warning in the log itself, not right after a blank line, is kept.
       log = ["Last 15 lines from /logs/foo/01.make:", "2026-09-30 10:00:00 +0000", "", "make",
              "Warning: jobserver unavailable", "make: *** No rule to make target `install`.  Stop."]
