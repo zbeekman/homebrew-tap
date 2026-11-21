@@ -44,6 +44,13 @@ module Homebrew
         llm = Timed::Command.llm_settings(args)
         Homebrew::Trust.trust_fully_qualified_items!(args.named, type: args.only_formula_or_cask)
         items = args.named.to_formulae_and_casks_and_unavailable(method: :resolve)
+        named = items.grep(Formula)
+        # Where `brew reinstall` stops before doing anything, even with only
+        # casks named.
+        if args.build_from_source? && !DevelopmentTools.installed?
+          raise BuildFlagsError.new(["--build-from-source"], bottled: named.all?(&:bottled?))
+        end
+
         named_casks = items.grep(Cask::Cask)
         # As `brew reinstall` does, first.
         casks = named_casks.reject do |cask|
@@ -57,7 +64,6 @@ module Homebrew
                                          resolve: ->(name) { Timed::Command.resolve("--guess", name) })
         exclude = (args.exclude || []).map { |name| Timed::Command.resolve("--exclude", name) }
 
-        named = items.grep(Formula)
         reinstall(named, casks, casks_named: args.cask? || named_casks.any?, estimator:, guesses:, exclude:, llm:)
         # As `brew reinstall` does, last.
         items.each { |item| ofail item if item.is_a?(Exception) }

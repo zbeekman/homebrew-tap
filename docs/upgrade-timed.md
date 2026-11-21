@@ -45,7 +45,9 @@ about any formula that `brew upgrade --dry-run` lists but the batches leave
 out, or the other way round (formulae given to `--exclude` count as planned,
 and a name that is also an installed cask's token is taken for the cask).
 `--interactive` can't be used, as it needs a terminal: use
-`brew upgrade --interactive` instead.
+`brew upgrade --interactive` instead. Without the developer tools,
+`--build-from-source` stops the command with Homebrew's error before it does
+anything, unless only casks are named, as `brew upgrade` does.
 
 Outdated casks are upgraded too, as `brew upgrade` does, before or after the
 batches: see [Casks](#casks).

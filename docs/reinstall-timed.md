@@ -35,8 +35,10 @@ carries on without asking, as `brew reinstall` does.
 
 Pinned formulae and casks are reported and left out, and unknown names are
 reported at the end and make the command fail, all as `brew reinstall` does.
-`--interactive` can't be used, as it needs a terminal: use
-`brew reinstall --interactive` instead. Casks are reinstalled too, before or
+Without the developer tools, `--build-from-source` stops it with Homebrew's
+error before it does anything, even with only casks named, as
+`brew reinstall` does. `--interactive` can't be used, as it needs a terminal:
+use `brew reinstall --interactive` instead. Casks are reinstalled too, before or
 after the formulae: see [Casks](#casks).
 
 `brew reinstall-timed` is a command in this tap. Trust it once with
