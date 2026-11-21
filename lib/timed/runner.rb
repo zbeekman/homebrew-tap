@@ -693,11 +693,19 @@ module Timed
 
     # A log no longer than the lines brew prints is printed whole, starting
     # with the time it was written (`Formula#system`), and brew's own text
-    # may follow within the count (`BuildError#dump`): its first line, or two
-    # blank lines in a row, end such a log.
+    # may follow within the count (`BuildError#dump`): its first line, two
+    # blank lines in a row, or a warning right after a blank line, end such a
+    # log. Brew prints a blank line and then warns of the host's diagnostic
+    # findings first, which may have blank lines of their own, and only then
+    # its text about reporting the issue. `READ THIS: ` is from brew before
+    # 2026-11-19, which routes issue reports by support tier.
     LOG_START = /\A\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}\z/
     AFTER_LOG = /
-      \A(?:#{Regexp.union("READ THIS: ", "If reporting this issue please do so ", "These open issues may also help:")}
+      \A(?:#{Regexp.union("READ THIS: ", "If reporting this issue", "These open issues may also help:",
+                          "Before reporting this issue, read:", "Report this issue to the ",
+                          "Report problems specific to this configuration ", "Please do not file Homebrew issues ",
+                          "Do not file issues for this configuration.")}
+      |\S+'s\sformula\s(?:was\sbuilt|is\sdeprecated|is\sdisabled)
       |This\sis\sa\sTier\s\d\sconfiguration:)
     /x
 
@@ -841,8 +849,8 @@ module Timed
         tail = @tail
         if tail
           @whole_log = LOG_START.match?(line) if problem.length == 1
-          log_ended = @whole_log &&
-                      (AFTER_LOG.match?(line) || (line.blank? && problem.length > 1 && problem.fetch(-1).blank?))
+          log_ended = @whole_log && (AFTER_LOG.match?(line) || (problem.length > 1 && problem.fetch(-1).blank? &&
+                                                                 (line.blank? || line.start_with?("Warning: "))))
           if tail.positive? && !STATUS.match?(line) && !log_ended
             @tail = tail - 1
             problem << line

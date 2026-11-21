@@ -64,26 +64,20 @@ RSpec.describe "brew internals", type: :system do
     calls
   end
 
-  # `[error, warnings]` from the source-build check of `brew install argv` for
-  # a bottled and an unbottled formula, with or without the developer tools:
-  # the message of the error it raises, if any, and the warnings it prints
-  # first.
-  def build_flags_outcome(argv, developer_tools:)
+  # The message of the error the source-build check of `brew install argv`
+  # raises for a bottled and an unbottled formula, with or without the
+  # developer tools, or `nil` if it goes on.
+  def build_flags_error(argv, developer_tools:)
     allow(DevelopmentTools).to receive(:installed?).and_return(developer_tools)
-    allow(Homebrew::EnvConfig).to receive(:developer?).and_return(false)
+    # Keeps the support tier a source build notes out of the run's exit.
+    allow(Homebrew::Diagnostic).to receive(:support_tiers).and_return([])
     # RuboCop's project index only sees this tap, so it takes brew's
     # `InstallCmd` for a typo of `InstallTimed`.
     command = Homebrew::Cmd::InstallCmd.new([*argv, "timed-canary"]) # rubocop:disable Lint/NameTypo
-    warnings = []
-    allow(command).to receive(:opoo) { |message| warnings << message }
-    allow(command).to receive(:puts)
-    error = begin
-      command.check_build_flags([true, false].map { |bottled| instance_double(Formula, bottled?: bottled) })
-      nil
-    rescue BuildFlagsError => e
-      e.message
-    end
-    [error, warnings]
+    command.check_build_flags([true, false].map { |bottled| instance_double(Formula, bottled?: bottled) })
+    nil
+  rescue BuildFlagsError => e
+    e.message
   end
 
   describe "tap commands" do
@@ -841,12 +835,12 @@ RSpec.describe "brew internals", type: :system do
       # the error shows the order brew lists them in.
       flag_pairs = [%w[--HEAD --build-bottle], %w[--HEAD --build-from-source]]
       outcomes = [[], *flag_pairs.map(&:reverse)].to_h do |argv|
-        [argv, build_flags_outcome(argv, developer_tools: false)]
+        [argv, build_flags_error(argv, developer_tools: false)]
       end
-      raised = flag_pairs.to_h { |flags| [flags.reverse, [BuildFlagsError.new(flags, bottled: false).message, []]] }
+      raised = flag_pairs.to_h { |flags| [flags.reverse, BuildFlagsError.new(flags, bottled: false).message] }
       expect([install.include?('odisabled "`brew install --env`", "`env :std` in specific formula files"'),
               install.match?(/^        check_build_flags\(formulae\)\n.*Install\.install_formula\?\(/m), outcomes])
-        .to eq([true, true, { [] => [nil, []], **raised }])
+        .to eq([true, true, { [] => nil, **raised }])
     end
 
     it "prints with `--dry-run` what `Install.ask_formulae` prints, which builds no installers of its own" do
@@ -1112,13 +1106,12 @@ RSpec.describe "brew internals", type: :system do
       expect(steps.map { |step| install.index(step) }.then { |at| at.all? && at == at.sort }).to be(true)
     end
 
-    it "warns that building from source isn't supported only with the developer tools, as it raises first " \
-       "without them" do
+    it "stops a source build only without the developer tools, leaving the rest to each batch" do
       outcomes = [true, false].to_h do |developer_tools|
-        [developer_tools, build_flags_outcome(["--build-from-source"], developer_tools:)]
+        [developer_tools, build_flags_error(["--build-from-source"], developer_tools:)]
       end
-      expect(outcomes).to eq(true  => [nil, ["building from source is not supported!"]],
-                             false => [BuildFlagsError.new(["--build-from-source"], bottled: false).message, []])
+      expect(outcomes).to eq(true  => nil,
+                             false => BuildFlagsError.new(["--build-from-source"], bottled: false).message)
     end
 
     # The keywords given to the call that starts with `call` in `source`, up
@@ -1328,6 +1321,45 @@ RSpec.describe "brew internals", type: :system do
               )]).to eq([true, true])
       expect(parsed(["Error: #{foo.full_name} #{foo.version} did not build"])).to eq(%w[foo])
     end
+  end
+
+  it "follows a failed build's whole log with text `Timed::Runner.parse` keeps out of the formula's problems, " \
+     "whatever the support tier, tap or provider" do
+    ENV["HOMEBREW_NO_BUILD_ERROR_ISSUES"] = "1"
+    foo = formula("foo", tap: Tap.fetch("user", "tap")) do
+      T.bind(self, T.class_of(Formula))
+      url "https://brew.sh/foo-1.0.tgz"
+    end
+    allow(Homebrew::Diagnostic).to receive(:support_tiers).and_return([])
+    # As on a Tier 1 host, which has somewhere to report issues.
+    stub_const("OS::ISSUES_URL", "https://docs.brew.sh/Troubleshooting")
+    log = ["Last 15 lines from #{foo.logs}/01.make.log:", "2026-09-30 10:00:00 +0000", "make", "make: *** Error 1"]
+    unsupported = OS::ThirdPartyHomebrew.new(tier: :unsupported)
+    provider = OS::ThirdPartyHomebrew.new(issues_url: "https://example.com/issues")
+    # Brew's own checks warn of the host's findings first, only those that
+    # don't depend on this computer: a Tier 3 prefix, whose warning has a
+    # blank line, and a third-party tool managing Homebrew, at its tier.
+    checks = Homebrew::Diagnostic::Checks.new
+    allow(Homebrew::Diagnostic::Checks).to receive(:new).and_return(checks)
+    allow(checks).to receive(:build_error_checks).and_return(%w[check_homebrew_prefix check_for_third_party_homebrew])
+    allow(BottleSpecification).to receive(:compatible_locations?).and_return(false)
+    # The formula's tap, whether it was built with `--HEAD`, whether Homebrew
+    # is in its default prefix and the third-party tool managing it, if any.
+    cases = { "Tier 1, official tap" => [CoreTap.instance, false, true, nil], "Tier 1" => [foo.tap, false, true, nil],
+              "Tier 3" => [foo.tap, false, false, nil], "unsupported" => [foo.tap, false, true, unsupported],
+              "--HEAD" => [foo.tap, true, true, nil], "provider" => [foo.tap, false, true, provider] }
+    problems = cases.transform_values do |(tap, head, default_prefix, third_party)|
+      allow(Homebrew).to receive(:default_prefix?).and_return(default_prefix)
+      allow(OS).to receive(:third_party_homebrew).and_return(third_party)
+      allow(foo).to receive_messages(tap:, head?: head)
+      error = BuildError.new(foo, "make", [], {})
+      # What it prints to both streams in one, as a batch reads them.
+      output = StringIO.new
+      [error, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
+      error.dump
+      Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] }).dig("foo", "problems")
+    end
+    expect(problems).to eq(cases.transform_values { [log.join("\n")] })
   end
 
   describe "`Tty`, which paints `brew build-times stats`, `histogram`, `runs` and `run`" do
