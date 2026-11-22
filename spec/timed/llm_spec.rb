@@ -912,7 +912,8 @@ RSpec.describe Timed::LLM do
     # client hangs up.
     def endless(client, gzip: false)
       deflate = Zlib::Deflate.new(Zlib::DEFAULT_COMPRESSION, Zlib::MAX_WBITS + 16) if gzip
-      client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n#{"Content-Encoding: gzip\r\n" if gzip}\r\n")
+      encoding = "Content-Encoding: gzip\r\n" if gzip
+      client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n#{encoding}\r\n")
       loop do
         chunk = "x" * 65_536
         chunk = deflate.deflate(chunk, Zlib::SYNC_FLUSH) if deflate
@@ -936,13 +937,15 @@ RSpec.describe Timed::LLM do
     end
 
     it "sends plain `http://` past any proxy" do
-      ENV["http_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 502 Proxy\r\n\r\n") }}"
+      port = serve { |client| client.write("HTTP/1.1 502 Proxy\r\n\r\n") }
+      ENV["http_proxy"] = "http://127.0.0.1:#{port}"
       described_class.post(request, 5.0)
       expect(received.pop).to start_with("POST /v1/messages ")
     end
 
     it "tunnels `https://` through `https_proxy` without showing it the key" do
-      ENV["https_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 403 Forbidden\r\n\r\n") }}"
+      port = serve { |client| client.write("HTTP/1.1 403 Forbidden\r\n\r\n") }
+      ENV["https_proxy"] = "http://127.0.0.1:#{port}"
       secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [],
                                        headers: { "x-api-key" => key }, body: "{}")
       expect { described_class.post(secure, 5.0) }.to raise_error(Timed::LLM::Error)
@@ -960,7 +963,8 @@ RSpec.describe Timed::LLM do
     end
 
     it "never quotes the reason `https_proxy` gives for refusing" do
-      ENV["https_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 407 sk-SLY-KNOTS\r\n\r\n") }}"
+      port = serve { |client| client.write("HTTP/1.1 407 sk-SLY-KNOTS\r\n\r\n") }
+      ENV["https_proxy"] = "http://127.0.0.1:#{port}"
       secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [], headers: {}, body: "{}")
       expect { described_class.post(secure, 5.0) }
         .to raise_error(Timed::LLM::Error, "`https_proxy` answered HTTP 407")
@@ -986,7 +990,8 @@ RSpec.describe Timed::LLM do
     end
 
     it "connects `https://` directly to hosts in `no_proxy`" do
-      ENV["https_proxy"] = "http://127.0.0.1:#{serve { |client| client.write("HTTP/1.1 403 Forbidden\r\n\r\n") }}"
+      port = serve { |client| client.write("HTTP/1.1 403 Forbidden\r\n\r\n") }
+      ENV["https_proxy"] = "http://127.0.0.1:#{port}"
       ENV["no_proxy"] = "192.0.2.1"
       expect(TCPSocket).to receive(:open).with("192.0.2.1", 443, any_args).and_raise(Errno::ECONNREFUSED)
       secure = Timed::LLM::Request.new(uri: secure_uri, addresses: [], headers: {}, body: "{}")
@@ -1001,7 +1006,8 @@ RSpec.describe Timed::LLM do
     end
 
     it "refuses plain `http://` without checked addresses, even with `http_proxy` set" do
-      ENV["http_proxy"] = "http://127.0.0.1:#{serve { |client| client.write(ok) }}"
+      port = serve { |client| client.write(ok) }
+      ENV["http_proxy"] = "http://127.0.0.1:#{port}"
       bare = Timed::LLM::Request.new(uri: URI::HTTP.build(host: "192.0.2.1", path: "/"), addresses: [],
                                      headers: { "Authorization" => "Bearer #{key}" }, body: "{}")
       expect { described_class.post(bare, 5.0) }.to raise_error(Timed::LLM::Error)
@@ -1122,7 +1128,8 @@ RSpec.describe Timed::LLM do
 
     it "gives up at once when a server stalls after passing 1 MiB mid-chunk" do
       stall = serve do |client|
-        client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n#{"x" * ((1024 * 1024) + 1)}")
+        past_limit = "x" * ((1024 * 1024) + 1)
+        client.write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n200000\r\n#{past_limit}")
         sleep
       end
       stalled = local_request(stall)

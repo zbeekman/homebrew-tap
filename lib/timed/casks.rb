@@ -305,7 +305,8 @@ module Timed
 
         dependents = installed_for[name]
         where = if dependents
-          "this run installs for #{dependents.map { |dependent| "`#{dependent}`" }.join(", ")}"
+          quoted = dependents.map { |dependent| "`#{dependent}`" }.join(", ")
+          "this run installs for #{quoted}"
         else
           "is in this run"
         end
@@ -521,12 +522,17 @@ module Timed
         directory = into_directory ? path : path&.dirname
         if path && directory
           # A glob is expanded by brew, so the directory stands in for its matches.
-          present = (step["type"] == "remove" && !glob?(path.basename.to_s)) ? path : directory
+          present = if step["type"] == "remove" && !glob?(path.basename.to_s)
+            path
+          else
+            directory
+          end
           next if facts.lstat(present).nil? || facts.writable?(directory)
         end
 
+        unwritable = directory || "its target"
         Reason.new(kind: :sudo, message: "`#{stanza}` runs `#{step["type"]}` with sudo when " \
-                                         "#{directory || "its target"} is not writable")
+                                         "#{unwritable} is not writable")
       end
     end
 
@@ -537,7 +543,11 @@ module Timed
       path = spec.fetch("path")
       return if path.include?("{{")
 
-      (spec["base"] == "relative") ? Pathname(path) : resolve_path(cask, spec)
+      if spec["base"] == "relative"
+        Pathname(path)
+      else
+        resolve_path(cask, spec)
+      end
     end
 
     sig { params(string: String).returns(T::Boolean) }

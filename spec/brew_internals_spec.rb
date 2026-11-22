@@ -160,7 +160,11 @@ RSpec.describe "brew internals", type: :system do
 
   it "covers every flight block stanza with Cask::Artifact::AbstractFlightBlock" do
     keys = Cask::DSL::ARTIFACT_BLOCK_CLASSES.flat_map do |klass|
-      (klass < Cask::Artifact::AbstractFlightBlock) ? [klass.dsl_key, klass.uninstall_dsl_key] : [klass]
+      if klass < Cask::Artifact::AbstractFlightBlock
+        [klass.dsl_key, klass.uninstall_dsl_key]
+      else
+        [klass]
+      end
     end
     expect(keys).to contain_exactly(:preflight, :postflight, :uninstall_preflight, :uninstall_postflight)
   end
@@ -270,7 +274,8 @@ RSpec.describe "brew internals", type: :system do
       on_upgrades = [nil, ":quit", ":signal", '"signal"', "[:signal]", '["signal"]']
       modes = { "upgrade" => { upgrade: true }, "reinstall" => { reinstall: true }, "uninstall" => {} }
       actual = on_upgrades.to_h do |on_upgrade|
-        stanza = %Q(uninstall signal: ["TERM", "com.foo"]#{", on_upgrade: #{on_upgrade}" if on_upgrade})
+        option = ", on_upgrade: #{on_upgrade}" if on_upgrade
+        stanza = %Q(uninstall signal: ["TERM", "com.foo"]#{option})
         [on_upgrade, modes.transform_values { |mode| dispatched(stanza, **mode).include?([:uninstall, :signal]) }]
       end
       named = { "upgrade" => true, "reinstall" => true, "uninstall" => true }
@@ -1618,7 +1623,9 @@ RSpec.describe "brew internals", type: :system do
       [error, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
       error.dump
       parsed = Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] })
-      ["#{name}#{", with its log file" if with_file}#{", annotated" if annotated}", parsed.dig("foo", "problems")]
+      file_note = ", with its log file" if with_file
+      annotation_note = ", annotated" if annotated
+      ["#{name}#{file_note}#{annotation_note}", parsed.dig("foo", "problems")]
     end
     expect(problems).to eq(problems.to_h do |key, _|
       [key, [logs.fetch(key.include?(", with its log file")).join("\n")]]

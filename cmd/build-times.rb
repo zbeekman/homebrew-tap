@@ -87,7 +87,8 @@ module Homebrew
           number = named.to_i
           # Before indexing, which raises for a number past a native integer.
           chosen = runs[number - 1] if number <= runs.length
-          odie "no run #{number}: #{Utils.pluralize("run", runs.length, include_count: true)} logged" if chosen.nil?
+          logged = Utils.pluralize("run", runs.length, include_count: true)
+          odie "no run #{number}: #{logged} logged" if chosen.nil?
           Timed::Runs.timeline(chosen, number, width: Tty.width).each { |heading, lines| ohai heading, *lines }
           puts Timed::Runs.total(chosen)
         end
@@ -150,10 +151,15 @@ module Homebrew
           names = args.named.empty? ? log.package_names : Timed::BuildLog.formula_names(args.named)
           times = names.map { |name| log.durations(name, status: args.poured? ? "poured" : "built") }.reject(&:empty?)
           what = args.poured? ? "pour" : "source build"
-          values = args.builds? ? times.flatten : times.map { |durations| Timed::BuildLog.mean(durations) }
+          values = if args.builds?
+            times.flatten
+          else
+            times.map { |durations| Timed::BuildLog.mean(durations) }
+          end
           counted = Utils.pluralize(args.builds? ? what : "formula", values.length, include_count: true)
           if values.length < 2
-            return ohai "No histogram: #{counted}#{" with a #{what} time" unless args.builds?}, at least 2 are needed"
+            timed = " with a #{what} time" unless args.builds?
+            return ohai "No histogram: #{counted}#{timed}, at least 2 are needed"
           end
 
           title = args.builds? ? "Time of #{counted}" : "Mean #{what} time of #{counted}"

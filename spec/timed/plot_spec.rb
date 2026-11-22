@@ -271,7 +271,11 @@ RSpec.describe Timed::Plot do
     def curve_height(lines, columns)
       rows = lines.first(Timed::Plot::HEIGHT).map { |line| line.sub(/\A *\d* [┤│]/, "")[columns].to_s }
       row = rows.index { |cells| cells.match?(/[⠁-⣿]/) }
-      row ? Timed::Plot::HEIGHT - row : 0
+      if row
+        Timed::Plot::HEIGHT - row
+      else
+        0
+      end
     end
 
     describe "with `smooth`" do

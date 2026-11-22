@@ -35,7 +35,12 @@ module Timed
     def self.facts(mac: OS.mac?, run: ->(argv) { Utils.popen_read({ "LC_ALL" => "C" }, *argv, err: :close) },
                    read: ->(path) { File.read(path) })
       output = ->(argv) { quietly { utf8(run.call(argv)) } }
-      sysctl = (mac ? output.call(["/usr/sbin/sysctl", *SYSCTLS]).to_s : "").lines.filter_map do |line|
+      sysctl_output = if mac
+        output.call(["/usr/sbin/sysctl", *SYSCTLS]).to_s
+      else
+        ""
+      end
+      sysctl = sysctl_output.lines.filter_map do |line|
         name, value = line.chomp.split(": ", 2)
         [name, value] if value
       end.to_h
@@ -102,7 +107,8 @@ module Timed
         "timed"             => -> { TIMED },
       }
       facts.filter_map do |name, fact|
-        value = quietly { fact.call.then { it.is_a?(String) ? it.split.join(" ").presence : it } }
+        value = quietly { fact.call }
+        value = value.split.join(" ").presence if value.is_a?(String)
         [name, value] unless value.nil?
       end.to_h
     end

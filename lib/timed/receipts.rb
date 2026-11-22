@@ -25,7 +25,11 @@ module Timed
     sig { params(receipt: Pathname, build: BuildLog::Build, exact: T::Boolean).void }
     def self.stamp(receipt, build, exact: false)
       data = JSON.parse(receipt.read)
-      data[KEY] = exact ? build : build.slice(*FIELDS).compact
+      data[KEY] = if exact
+        build
+      else
+        build.slice(*FIELDS).compact
+      end
       receipt.atomic_write(JSON.pretty_generate(data))
     end
 

@@ -101,7 +101,12 @@ module Timed
                                "provider's API, `low` for `claude-haiku-5-5`, `claude-sonnet-5-5` and " \
                                "`claude-opus-5-5`, `minimal` for `gpt-5-mini` and none for other models.",
                   depends_on:  "--llm-estimates"
-      (last ? PLAN_FLAGS : PLAN_FLAGS - ["last"]).each { |name| parser.conflicts "--cask", "--#{name}" }
+      conflicting = if last
+        PLAN_FLAGS
+      else
+        PLAN_FLAGS - ["last"]
+      end
+      conflicting.each { |name| parser.conflicts "--cask", "--#{name}" }
     end
 
     LLM_FLAGS = %w[llm_estimates llm_api_key_file llm_provider llm_url llm_model llm_timeout llm_effort].freeze
@@ -291,7 +296,11 @@ module Timed
           # Brew installed the batches in other processes.
           Formula.clear_cache
           outdated = installers.reject { |installer| installer.formula.latest_version_installed? }
-          outdated.empty? ? [] : Homebrew::Upgrade.filter_dependent_formula_installers(outdated).map(&:formula)
+          if outdated.empty?
+            []
+          else
+            Homebrew::Upgrade.filter_dependent_formula_installers(outdated).map(&:formula)
+          end
         end,
         finish: ->(left) { upgrade_command(left, own:) }
       )
@@ -330,8 +339,9 @@ module Timed
           broken = begin
             broken_dependents(dependents_to_check(all, poured:))
           rescue Interrupt
+            installed_names = (all + poured).map(&:full_name).join(" ")
             opoo "The check for broken linkage didn't finish; not all the dependents of " \
-                 "#{(all + poured).map(&:full_name).join(" ")} were checked."
+                 "#{installed_names} were checked."
             raise
           end
           ohai "No broken dependents found!" if broken.empty?
@@ -354,7 +364,11 @@ module Timed
         Formula.installed.select do |formula|
           formula.any_installed_keg&.runtime_dependencies&.any? do |dependency|
             full_name = dependency["full_name"].to_s
-            dependency_tap = full_name.include?("/") ? full_name.rpartition("/").first : CoreTap.instance.name
+            dependency_tap = if full_name.include?("/")
+              full_name.rpartition("/").first
+            else
+              CoreTap.instance.name
+            end
             Utils.name_from_full_name(full_name) == name && dependency_tap == tap
           end
         end
@@ -363,12 +377,17 @@ module Timed
       end
       ready, others = dependents.partition { |dependent| fixable?(dependent, blocked:, excluded:) }
       how = if ready.any?
-        "\nTo check them, reinstall them from source:\n  #{reinstall_command(ready.map(&:full_name)).join("\n")}"
+        command = reinstall_command(ready.map(&:full_name)).join("\n")
+        "\nTo check them, reinstall them from source:\n  #{command}"
       end
       if others.any?
-        how = "#{how}\nNot counting #{others.map(&:full_name).join(" ")}, which " \
-              "#{(others.length == 1) ? "is" : "are"} pinned, outdated, left out of the run or " \
-              "#{(others.length == 1) ? "needs" : "need"} what this run didn't install."
+        other_names = others.map(&:full_name).join(" ")
+        one = others.length == 1
+        is = one ? "is" : "are"
+        needs = one ? "needs" : "need"
+        how = "#{how}\nNot counting #{other_names}, which " \
+              "#{is} pinned, outdated, left out of the run or " \
+              "#{needs} what this run didn't install."
       end
       opoo "Couldn't check the dependents of #{name} for broken linkage: #{error}#{how}"
     end
@@ -414,7 +433,8 @@ module Timed
       names = ->(formulae) { formulae.map(&:full_name).join(" ") }
       what = lambda do |formulae, kind = nil|
         count = Utils.pluralize("dependent", formulae.length, include_count: true)
-        "Not reinstalling #{count.sub(" ", " #{kind} ".squeeze(" "))} with broken linkage"
+        counted = count.sub(" ", " #{kind} ".squeeze(" "))
+        "Not reinstalling #{counted} with broken linkage"
       end
       reinstall = ->(formulae) { reinstall_command(formulae.map(&:full_name)).join("\n") }
       upgrade = ->(formulae) { upgrade_command(formulae.map(&:full_name), own:) }
@@ -429,15 +449,19 @@ module Timed
       end
       if waiting.any?
         held = waiting.select(&:pinned?)
-        needing = waiting.map { |formula| "#{formula.full_name} (needs #{needs.fetch(formula).join(" ")})" }
+        needing = waiting.map do |formula|
+          needed = needs.fetch(formula).join(" ")
+          "#{formula.full_name} (needs #{needed})"
+        end
+        unpin = "Unpin #{names.call(held)} first. " if held.any?
+        waiting_fixes = fixes.call(waiting, "", "")
         opoo "#{what.call(waiting)}, as they need what this run didn't install: #{needing.join(", ")}\n" \
-             "#{"Unpin #{names.call(held)} first. " if held.any?}Once that installs, run:\n" \
-             "#{fixes.call(waiting, "", "")}"
+             "#{unpin}Once that installs, run:\n#{waiting_fixes}"
       end
       if pinned.any?
-        onoe "#{what.call(pinned, "pinned")}: #{names.call(pinned)}\n" \
-             "#{fixes.call(pinned, "Once unpinned, reinstall with:\n",
-                           "Once unpinned, upgrade, which reinstalls, with:\n")}"
+        pinned_fixes = fixes.call(pinned, "Once unpinned, reinstall with:\n",
+                                  "Once unpinned, upgrade, which reinstalls, with:\n")
+        onoe "#{what.call(pinned, "pinned")}: #{names.call(pinned)}\n#{pinned_fixes}"
       end
       if outdated.any?
         opoo "#{what.call(outdated, "outdated")}: #{names.call(outdated)}\n" \
@@ -448,7 +472,11 @@ module Timed
              "Reinstall with:\n  #{reinstall.call(left_out)}"
       end
       if untouched.any?
-        they = (untouched.length == 1) ? "it installs" : "they install"
+        they = if untouched.length == 1
+          "it installs"
+        else
+          "they install"
+        end
         opoo "#{what.call(untouched)} that this run didn't finish: #{names.call(untouched)}\n" \
              "Once #{they}, reinstall with:\n  #{reinstall.call(untouched)}"
       end
@@ -777,16 +805,19 @@ module Timed
         end
         count = Utils.pluralize("formula", batches.sum { |batch| batch.names.length }, include_count: true)
         total = duration.call(batches.flat_map(&:names))
-        oh1 "Would #{verb} #{"the dependencies of " if dependencies_only}#{count} in " \
-            "#{Utils.pluralize("batch", batches.length, plural: "es", include_count: true)}" \
-            "#{", estimated #{total}" if total}"
+        of = "the dependencies of " if dependencies_only
+        batch_count = Utils.pluralize("batch", batches.length, plural: "es", include_count: true)
+        estimated = ", estimated #{total}" if total
+        oh1 "Would #{verb} #{of}#{count} in #{batch_count}#{estimated}"
         batches.each.with_index(1) do |batch, index|
           reason = batch.reason if batch.reason != "--last"
           time = duration.call(batch.names)
           own_verb = batch.verb
           tags = [("--last" if batch.label == "last"), (BATCH_VERB_TAGS[own_verb] if own_verb)].compact
-          ohai "Batch #{index} of #{batches.length}#{" (#{tags.join(", ")})" if tags.any?}" \
-               "#{": #{time}" if time}#{", #{reason}" if reason}"
+          tagged = " (#{tags.join(", ")})" if tags.any?
+          timed = ": #{time}" if time
+          why = ", #{reason}" if reason
+          ohai "Batch #{index} of #{batches.length}#{tagged}#{timed}#{why}"
           batch.names.each do |name|
             next puts "dependencies of #{name}" if dependencies_only
 
@@ -823,7 +854,8 @@ module Timed
         method = :"#{option_name(name)}?"
         value = args.public_send(method)
         defaults ||= parser.parse(["--", *args.named])
-        "--#{"no-" unless value}#{name}" if !value.nil? && value != defaults.public_send(method)
+        negation = "no-" unless value
+        "--#{negation}#{name}" if !value.nil? && value != defaults.public_send(method)
       end
       args.options_only + switches
     end
@@ -938,7 +970,11 @@ module Timed
         # `--skip-cask-deps`, when brew fails a cask whose dependency can't
         # be loaded with its own error.
         cask_dependencies = all_needs.transform_values do |needed|
-          skip_cask_deps ? [[], []] : [needed.casks.map(&:full_name), needed.unresolved_casks]
+          if skip_cask_deps
+            [[], []]
+          else
+            [needed.casks.map(&:full_name), needed.unresolved_casks]
+          end
         end
         Casks.plan(list, verb:, in_run:, casks_in_run:, facts:, tty:, installed:, zap:, force:, needs:, missing:,
                          cask_dependencies:, installed_for:)
@@ -953,21 +989,32 @@ module Timed
     sig { params(verb: String, plan: Casks::Plan, flags: T::Array[String]).void }
     def self.show_casks(verb, plan, flags:)
       rows = lambda do |entries|
-        entries.map { |entry| "#{entry.cask.full_name}: #{entry.reasons.map(&:message).join("; ")}" }
+        entries.map do |entry|
+          messages = entry.reasons.map(&:message).join("; ")
+          "#{entry.cask.full_name}: #{messages}"
+        end
       end
       { "first" => plan.first, "last" => plan.last }.each do |label, entries|
         next if entries.empty?
 
-        ohai "Would #{verb} #{Utils.pluralize("cask", entries.length, include_count: true)} #{label}"
-        puts((label == "first") ? entries.map { |entry| entry.cask.full_name }.join(" ") : rows.call(entries))
+        counted = Utils.pluralize("cask", entries.length, include_count: true)
+        ohai "Would #{verb} #{counted} #{label}"
+        if label == "first"
+          puts entries.map { |entry| entry.cask.full_name }.join(" ")
+        else
+          puts rows.call(entries)
+        end
       end
       return if plan.skipped.empty?
 
       casks = plan.skipped.map(&:cask)
+      skipped_count = Utils.pluralize("cask", casks.length, include_count: true)
+      skipped_rows = rows.call(plan.skipped).join("\n")
+      run_later = later(verb, casks, flags:)
       opoo <<~EOS
-        Skipping #{Utils.pluralize("cask", casks.length, include_count: true)}, as sudo can't ask for a password without a terminal:
-        #{rows.call(plan.skipped).join("\n")}
-        #{later(verb, casks, flags:)}
+        Skipping #{skipped_count}, as sudo can't ask for a password without a terminal:
+        #{skipped_rows}
+        #{run_later}
       EOS
     end
 
@@ -1123,26 +1170,36 @@ module Timed
              merged: T::Boolean).void
     }
     def self.casks_not_run(reason, verb, casks, flags:, run:, merged: false)
+      names = casks.map(&:full_name).join(" ")
       message = "#{reason}, so the #{Utils.pluralize("cask", casks.length)} to #{verb} after the formulae " \
-                "didn't run: #{casks.map(&:full_name).join(" ")}"
+                "didn't run: #{names}"
       blocked = blocked_casks(casks, run.roots.keys | run.needs.values.flatten)
       if blocked.empty?
-        opoo "#{message}\n#{later(verb, casks, flags:)}"
+        run_later = later(verb, casks, flags:)
+        opoo "#{message}\n#{run_later}"
         return
       end
 
       one = blocked.length == 1
       ready = casks - blocked.keys
+      blocked_count = Utils.pluralize("cask", blocked.length, include_count: true)
+      needs = one ? "needs" : "need"
+      them = one ? "it" : "them"
       lines = [
         message,
-        "#{Utils.pluralize("cask", blocked.length, include_count: true)} #{one ? "needs" : "need"} formulae of " \
+        "#{blocked_count} #{needs} formulae of " \
         "this run that aren't installed, which brew would\n" \
-        "install for #{one ? "it" : "them"}, but not as this run would:",
+        "install for #{them}, but not as this run would:",
         *finish_first(verb, blocked, flags:, run:, merged:),
       ]
       if ready.any?
-        lines << "#{verb.capitalize} the #{(ready.length == 1) ? "other" : "others"} later with " \
-                 "`#{cask_command(verb, ready, flags:)}`."
+        others = if ready.length == 1
+          "other"
+        else
+          "others"
+        end
+        command = cask_command(verb, ready, flags:)
+        lines << "#{verb.capitalize} the #{others} later with `#{command}`."
       end
       opoo lines.join("\n")
     end
@@ -1184,8 +1241,13 @@ module Timed
     }
     def self.finish_first(verb, blocked, flags:, run:, merged: false)
       command = finish_run(run, blocked.values.flatten)
-      them = (blocked.length == 1) ? "it" : "them"
-      casks = "#{verb} #{them} with `#{cask_command(verb, blocked.keys, flags:)}`."
+      them = if blocked.length == 1
+        "it"
+      else
+        "them"
+      end
+      casks_command = cask_command(verb, blocked.keys, flags:)
+      casks = "#{verb} #{them} with `#{casks_command}`."
       finish = if command.nil?
         "Once those are installed, #{casks}"
       elsif merged
@@ -1214,7 +1276,8 @@ module Timed
       blocked = blocked_casks(casks, left | left.flat_map { |name| run_dependencies.fetch(name, []) })
       return command if blocked.empty?
 
-      "#{command}\n  #{cask_command(verb, blocked.keys, flags:)}"
+      casks_command = cask_command(verb, blocked.keys, flags:)
+      "#{command}\n  #{casks_command}"
     end
 
     # The `run`'s command for the formulae given to it that are among
@@ -1244,9 +1307,16 @@ module Timed
       unfinished |= unfinished.flat_map { |name| run_dependencies.fetch(name, []) }
       blocked = blocked_casks(casks, unfinished)
       if blocked.any?
+        blocked_count = Utils.pluralize("cask", blocked.length, include_count: true)
+        needs = if blocked.length == 1
+          "needs"
+        else
+          "need"
+        end
+        finish = finish_first(verb, blocked, flags:, run:, merged:).join("\n")
         opoo <<~EOS
-          Not #{verb.delete_suffix("e")}ing #{Utils.pluralize("cask", blocked.length, include_count: true)}, which #{(blocked.length == 1) ? "needs" : "need"} formulae that didn't #{verb} and aren't installed:
-          #{finish_first(verb, blocked, flags:, run:, merged:).join("\n")}
+          Not #{verb.delete_suffix("e")}ing #{blocked_count}, which #{needs} formulae that didn't #{verb} and aren't installed:
+          #{finish}
         EOS
       end
       (casks - blocked.keys).map(&:full_name)
@@ -1256,8 +1326,13 @@ module Timed
     # (see `cask_command`).
     sig { params(verb: String, casks: T::Array[Cask::Cask], flags: T::Array[String]).returns(String) }
     def self.later(verb, casks, flags:)
-      "#{verb.capitalize} #{(casks.length == 1) ? "it" : "them"} later with " \
-        "`#{cask_command(verb, casks, flags:)}`."
+      them = if casks.length == 1
+        "it"
+      else
+        "them"
+      end
+      command = cask_command(verb, casks, flags:)
+      "#{verb.capitalize} #{them} later with `#{command}`."
     end
 
     # The command that runs `casks` with the cask `flags` their call was
