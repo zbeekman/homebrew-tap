@@ -763,33 +763,45 @@ RSpec.describe "brew internals", type: :system do
 
   # `Timed::Runner.run`'s `stops_at_failure`, which `ReinstallTimed#run`
   # passes and reads `stopped_early` from to skip its last casks, and which
-  # takes a failed call that printed `Installation times` as one brew
+  # takes a failed call that printed `Installation times` (`INSTALL_TIMES`,
+  # which brew prints for the `--display-times` it passes) as one brew
   # finished, not stopped early.
-  it "finishes `brew reinstall`, printing `Installation times`, after the dependents, but never after a failed " \
-     "build" do
+  it "finishes `brew reinstall --display-times`, printing `Installation times`, after the dependents, but never " \
+     "after a failed build", :aggregate_failures do
     foo = plain_formula("foo")
     allow(Homebrew::Install).to receive_messages(perform_preinstall_checks_once: nil, ask_formulae: nil)
-    # Nothing to download.
+    # Nothing to download or clean up.
     allow(Homebrew::Install).to receive(:enqueue_formulae) { |installers, **| installers }
-    # What brew reaches, in order, after each kind of failure.
-    reached = [BuildError.new(foo, "make", [], {}), RuntimeError.new("failed")].to_h do |error|
-      calls = []
+    allow(Homebrew::Cleanup).to receive_messages(install_clean!: nil, periodic_clean!: nil)
+    marker = "<upgrading dependents>"
+    allow(Homebrew::Upgrade).to receive(:upgrade_dependents) do
+      # Into brew's output, which `output` captures below.
+      puts marker # rubocop:disable RSpec/Output
+      []
+    end
+    # The marker and the times heading brew prints, in order, after each kind
+    # of failure.
+    printed = { BuildError => [], RuntimeError => [marker, Timed::Runner::INSTALL_TIMES] }
+    [BuildError.new(foo, "make", [], {}), RuntimeError.new("failed")].each do |error|
+      # Brew's record of an installed formula, as its install leaves it, so
+      # it has times to print; a new one each run, so none is left behind.
+      messages = Messages.new
+      messages.package_installed("foo", 1.0)
+      allow(Homebrew).to receive(:messages).and_return(messages)
       allow(Homebrew::Reinstall).to receive(:reinstall_formula).and_raise(error)
-      allow(Homebrew::Upgrade).to receive(:upgrade_dependents) do
-        calls << :upgrade_dependents
-        []
-      end
-      allow(Homebrew::Install).to receive(:finish_installation) { calls << :finish_installation }
-      cmd = Homebrew::Cmd::Reinstall.new(%w[--formula foo])
+      cmd = Homebrew::Cmd::Reinstall.new(%w[--formula --display-times foo])
       allow(cmd.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([foo])
-      begin
+      expected = printed.fetch(error.class)
+      order = satisfy("print #{expected} after a #{error.class}") do |text|
+        text.lines(chomp: true).select { |line| [marker, Timed::Runner::INSTALL_TIMES].include?(line) } == expected
+      end
+      expect do
         cmd.run
       rescue BuildError
-        calls << :raised
-      end
-      [error.class, calls]
+        # Brew's global handler reports it.
+        nil
+      end.to output(order).to_stdout
     end
-    expect(reached).to eq(BuildError => [:raised], RuntimeError => [:upgrade_dependents, :finish_installation])
   end
 
   it "prints `Installation times` in a fixed format" do
