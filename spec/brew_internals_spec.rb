@@ -1363,9 +1363,14 @@ RSpec.describe "brew internals", type: :system do
         installers = dependents.map { FormulaInstaller.new(it) }
         Homebrew::Upgrade.upgrade_dependents(deps, upgraded, flags: [], prefetched_formula_installers: installers)
       end
-      # Two headings for each call.
-      expect { [1, 2].each(&run) }
-        .to output(satisfy { |text| text.lines(chomp: true).grep(Timed::Runner::DEPENDENTS).size == 4 }).to_stdout
+      # Two lines `DEPENDENTS` matches in what brew prints for each number of
+      # dependents.
+      [1, 2].each do |count|
+        headings = satisfy("have 2 lines `DEPENDENTS` matches for #{count} dependents") do |text|
+          text.lines(chomp: true).grep(Timed::Runner::DEPENDENTS).size == 2
+        end
+        expect { run.call(count) }.to output(headings).to_stdout
+      end
       # Brew's warning for a post-install that fails however it runs.
       installer = FormulaInstaller.new(foo)
       allow(installer).to receive(:post_install_formula_path).and_raise(RuntimeError)
