@@ -277,7 +277,7 @@ module Timed
                 failed_in_batch.concat(kept.reject { |name| done.fetch(name) })
                 next if !stops || results.last || interrupts.any?
 
-                output = lines.drop(first_line).map { |line, _| line.chomp.gsub(ANSI, "") }
+                output = lines.drop(first_line).flat_map { |line, _| plain_lines(line) }
                 # Brew prints the times (`--display-times`) as it finishes, if
                 # it installed anything, which it never reaches once stopped.
                 next if output.include?(INSTALL_TIMES)
@@ -460,7 +460,8 @@ module Timed
     # (`BuildError#dump`). A failed post-install prints the same log tail
     # first and carries on (`FormulaInstaller#post_install`), as does a failed
     # build of a dependent, which comes after brew's dependents heading
-    # (`Upgrade.upgrade_dependents`).
+    # (`Upgrade.upgrade_dependents`). An annotation reads as the error or
+    # warning (`plain_lines`).
     BUILD_FAILED = /\A(?:Last \d+ lines from .+:|Error: \S+ \S+ did not build)\z/
     POST_INSTALL_FAILED = "Warning: The post-install step did not complete successfully"
     DEPENDENTS = /
@@ -638,6 +639,26 @@ module Timed
     # Colours, which brew adds with `HOMEBREW_COLOR` and builds add anyway.
     ANSI = /\e\[[\d;]*[A-Za-z]/
 
+    # An error or warning (`onoe`, `ofail`, `opoo`) as brew prints it under
+    # GitHub Actions (`GitHub::Actions::Annotation#to_s`): its type, any data
+    # (a file, a line, a title without `::`), then the message, escaped
+    # (`GitHub::Actions.escape`) to fit one line.
+    ANNOTATION = /\A::(?<type>error|warning)(?: .*?)?::(?<message>.*)\z/
+
+    # The lines of brew's output `raw`, a line of it, stands for, as `parse`
+    # reads them: without colours, and, for brew's annotation of an error or
+    # warning, the lines brew prints for it without GitHub Actions, starting
+    # with `Error: ` or `Warning: `. Other annotations are left as they are.
+    sig { params(raw: String).returns(T::Array[String]) }
+    def self.plain_lines(raw)
+      line = raw.chomp.gsub(ANSI, "")
+      return [line] unless (match = ANNOTATION.match(line))
+
+      # In one pass, so a decoded `%` never starts another escape.
+      message = match[:message].to_s.gsub(/%(?:25|0A|0D)/, "%25" => "%", "%0A" => "\n", "%0D" => "\r")
+      "#{match[:type].to_s.capitalize}: #{message}".lines.map(&:chomp)
+    end
+
     # Where brew starts on a formula, with any options after the name: each
     # upgrade (`Upgrade.print_upgrade_message`), each reinstall
     # (`Reinstall.reinstall_formula`), each install of a tap formula
@@ -684,6 +705,7 @@ module Timed
     # nothing else has, and brew is done with the formula after it. A verbose
     # build prints its output as it goes instead, and its failure ends with
     # an error naming the formula (`BuildError#dump`), which does the same.
+    # An error's annotation reads as the error (`plain_lines`).
     PROBLEM = %r{
       \A(?:Error:(?:\s(?<failed>\S+)\s\S+\sdid\snot\sbuild\z)?
       |Last\s(?<tail>\d+)\slines\sfrom\s(?:(?<log_path>.*/(?<log_name>[^/]+)/[^/]+):\z)?)
@@ -703,7 +725,8 @@ module Timed
     # their own, and only then its text about reporting the issue. A log
     # with a warning of its own right after a blank line is cut there.
     # `READ THIS: ` is from brew before 2026-11-19, which routes issue
-    # reports by support tier.
+    # reports by support tier. A warning's annotation reads as the warning
+    # (`plain_lines`).
     LOG_START = /\A\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}\z/
     AFTER_LOG = /
       \A(?:#{Regexp.union("READ THIS: ", "If reporting this issue", "These open issues may also help:",
@@ -763,7 +786,16 @@ module Timed
 
       sig { params(raw: String, time: T.nilable(Float)).void }
       def feed(raw, time)
-        line = raw.chomp.gsub(ANSI, "")
+        lines = Runner.plain_lines(raw)
+        # A log's tail counts what it prints of the log as one line each.
+        tail = @tail
+        @tail = tail + lines.length - 1 if tail&.positive?
+        lines.each { |line| feed_line(line, time) }
+      end
+
+      # Reads `line`, one of `plain_lines`.
+      sig { params(line: String, time: T.nilable(Float)).void }
+      def feed_line(line, time)
         return if (problem = @problem) && took_problem_line?(problem, line)
 
         if @in_times && (row = INSTALL_TIME.match(line))
@@ -893,7 +925,7 @@ module Timed
         # name any file, or a pipe or device, which could block.
         return if path.nil? || !File.expand_path(path).start_with?("#{HOMEBREW_LOGS}/") || !File.file?(path)
 
-        lines = File.foreach(path).first(count).map { |raw| raw.scrub.chomp.gsub(ANSI, "") }
+        lines = File.foreach(path).first(count).flat_map { |raw| Runner.plain_lines(raw.scrub) }
         lines if lines.first == first
       rescue SystemCallError
         nil

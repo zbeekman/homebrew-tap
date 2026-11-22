@@ -1120,19 +1120,25 @@ RSpec.describe Timed::Runner do
       end
 
       it "says whether brew stopped at a failed build of the call's last formula, by the log tail or the " \
-         "verbose error it prints for one, but not of a dependent it rebuilt or a failed post-install" do
+         "verbose error it prints for one, but not of a dependent it rebuilt or a failed post-install, " \
+         "whether brew prints its errors and warnings plainly or as GitHub Actions annotations" do
         stub_formula("app")
         started = "==> Reinstalling app\n"
         tail = "Last 15 lines from #{HOMEBREW_LOGS}/app/01.make.log:\n"
         outputs = {
-          "log tail"      => [started, tail, "make: *** [all] Error 1\n"],
-          "verbose error" => [started, "\e[31mError:\e[0m app 2.0 did not build\n"],
-          "other error"   => [started, "Error: app: it failed\n"],
-          "post-install"  => [started, tail, "Warning: The post-install step did not complete successfully\n"],
-          "dependent"     => [started, "==> Checking for dependents of upgraded formulae...\n",
-                              "==> Reinstalling dep\n", "Last 15 lines from #{HOMEBREW_LOGS}/dep/01.make.log:\n"],
-          "outdated"      => [started, "==> Upgrading 1 dependent of upgraded formula:\n",
-                              "Error: dep 2.0 did not build\n"],
+          "log tail"                 => [started, tail, "make: *** [all] Error 1\n"],
+          "verbose error"            => [started, "\e[31mError:\e[0m app 2.0 did not build\n"],
+          "verbose error annotation" => [started, "::error file=Formula/app.rb,line=3::app 2.0 did not build\n"],
+          "other error"              => [started, "Error: app: it failed\n"],
+          "post-install"             => [started, tail,
+                                         "Warning: The post-install step did not complete successfully\n"],
+          "post-install annotation"  => [started, tail,
+                                         "::warning::The post-install step did not complete successfully\n"],
+          "dependent"                => [started, "==> Checking for dependents of upgraded formulae...\n",
+                                         "==> Reinstalling dep\n",
+                                         "Last 15 lines from #{HOMEBREW_LOGS}/dep/01.make.log:\n"],
+          "outdated"                 => [started, "==> Upgrading 1 dependent of upgraded formula:\n",
+                                         "Error: dep 2.0 did not build\n"],
         }
         stopped = outputs.transform_values do |lines|
           allow(described_class).to receive(:stream) do |_argv, &on_line|
@@ -1141,8 +1147,9 @@ RSpec.describe Timed::Runner do
           end
           run([batch("app")], verb: "reinstall", stops_at_failure: true).stopped_early
         end
-        expect(stopped).to eq("log tail" => true, "verbose error" => true, "other error" => false,
-                              "post-install" => false, "dependent" => false, "outdated" => false)
+        expect(stopped).to eq("log tail" => true, "verbose error" => true, "verbose error annotation" => true,
+                              "other error" => false, "post-install" => false, "post-install annotation" => false,
+                              "dependent" => false, "outdated" => false)
       end
     end
 
@@ -1445,6 +1452,54 @@ RSpec.describe Timed::Runner do
                        .dig("foo", "problems")
       end
       expect(problems).to eq(after.transform_values { [[log.fetch(0), *log.last(5)].join("\n")] })
+    end
+
+    it "reads brew's errors and warnings printed as GitHub Actions annotations as it reads them printed plainly" do
+      log = ["Last 15 lines from /logs/foo/01.make:", "2026-09-30 10:00:00 +0000", "", "make",
+             "make: *** No rule to make target `install`.  Stop."]
+      # Each as brew prints it under GitHub Actions, then as it prints it
+      # otherwise, after the formula's heading.
+      outputs = {
+        "error"                            => [["::error::foo: it failed: a::b", "detail"],
+                                               ["Error: foo: it failed: a::b", "detail"]],
+        "error of several lines"           => [
+          ["::error::curl: (22) 404%0D%0AFailure while executing; 100%25 done, not %250A%0A%0Aend"],
+          ["Error: curl: (22) 404\r", "Failure while executing; 100% done, not %0A", "", "end"],
+        ],
+        "verbose build's error, with data" => [
+          ["::error file=Formula/foo.rb,line=3,title=Build: ::user/tap/foo 1.0 did not build", "Logs:",
+           "     /logs/foo/01.make"],
+          ["Error: user/tap/foo 1.0 did not build", "Logs:", "     /logs/foo/01.make"],
+        ],
+        "warning after a whole short log"  => [
+          [*log, "", "::warning file=x.rb::A newer Command Line Tools release is available.%0A%0AUpdate them.", "",
+           "This is a Tier 2 configuration:"],
+          [*log, "", "Warning: A newer Command Line Tools release is available.", "", "Update them.", "",
+           "This is a Tier 2 configuration:"],
+        ],
+        "notice, left as it is"            => [["::error::foo: it failed", "::notice::50%25 done"],
+                                               ["Error: foo: it failed", "::notice::50%25 done"]],
+      }
+      parse = ->(lines) { described_class.parse(["==> Upgrading foo", *lines].map { |line| ["#{line}\n", nil] }) }
+      expect(outputs.transform_values { |annotated, _| parse.call(annotated) })
+        .to eq(outputs.transform_values { |_, plain| parse.call(plain) })
+    end
+
+    it "reads a GitHub Actions annotation in a build's own log in brew's plain form, as one line of the log" do
+      log = ["2026-09-30 10:00:00 +0000", "", "make", "::warning::jobserver%0Aunavailable",
+             "make: *** No rule to make target `install`.  Stop."]
+      plain = [*log.first(3), "Warning: jobserver", "unavailable", log.fetch(-1)]
+      file = HOMEBREW_LOGS/"foo/01.make.log"
+      file.dirname.mkpath
+      file.write([*log, "", "HOMEBREW_VERSION: 5.0.0", ""].join("\n"))
+      whole = "Last 15 lines from #{file}:"
+      tail = "Last 2 lines from #{file}:"
+      # Printed whole, then as its last 2 lines.
+      printed = { whole => [whole, *log, "", "Warning: A newer Command Line Tools release is available."],
+                  tail  => [tail, *log.last(2)] }
+      expect(printed.transform_values do |lines|
+        described_class.parse(["==> Upgrading foo", *lines].map { |line| ["#{line}\n", nil] }).dig("foo", "problems")
+      end).to eq(whole => [[whole, *plain.last(5)].join("\n")], tail => [[tail, *plain.last(3)].join("\n")])
     end
 
     it "doesn't take other programs' `fatal:` lines for brew's errors" do
