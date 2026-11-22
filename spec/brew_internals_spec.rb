@@ -1360,7 +1360,7 @@ RSpec.describe "brew internals", type: :system do
   end
 
   it "follows a failed build's whole log with text `Timed::Runner.parse` keeps out of the formula's problems, " \
-     "whatever the support tier, tap or provider" do
+     "whatever the support tier, tap or provider, and with GitHub Actions annotations" do
     ENV["HOMEBREW_NO_BUILD_ERROR_ISSUES"] = "1"
     foo = formula("foo", tap: Tap.fetch("user", "tap")) do
       T.bind(self, T.class_of(Formula))
@@ -1369,8 +1369,15 @@ RSpec.describe "brew internals", type: :system do
     allow(Homebrew::Diagnostic).to receive(:support_tiers).and_return([])
     # As on a Tier 1 host, which has somewhere to report issues.
     stub_const("OS::ISSUES_URL", "https://docs.brew.sh/Troubleshooting")
-    log = ["Last 15 lines from #{foo.logs}/01.make.log:", "2026-09-30 10:00:00 +0000", "make", "",
-           "Warning: jobserver unavailable", "make: *** Error 1"]
+    # By whether it has its log file. With it, a warning of its own right
+    # after a blank line, which only the file shows is part of the log;
+    # without it, one not right after a blank line, so that brew's text must
+    # end the log.
+    header = "Last 15 lines from #{foo.logs}/01.make.log:"
+    logs = { true  => [header, "2026-09-30 10:00:00 +0000", "make", "", "Warning: jobserver unavailable",
+                       "make: *** Error 1"],
+             false => [header, "2026-09-30 10:00:00 +0000", "", "make", "Warning: jobserver unavailable",
+                       "make: *** Error 1"] }
     unsupported = OS::ThirdPartyHomebrew.new(tier: :unsupported)
     provider = OS::ThirdPartyHomebrew.new(issues_url: "https://example.com/issues")
     # Brew's own checks warn of the host's findings first, only those that
@@ -1387,9 +1394,16 @@ RSpec.describe "brew internals", type: :system do
               "--HEAD" => [foo.tap, true, true, nil], "provider" => [foo.tap, false, true, provider] }
     file = foo.logs/"01.make.log"
     # Each with the log file as `Formula#system` leaves it, the log then a
-    # blank line and the build's configuration, and without it.
-    problems = cases.keys.product([true, false]).to_h do |name, with_file|
+    # blank line and the build's configuration, and without it; then each
+    # again under GitHub Actions, where brew prints its warnings, such as the
+    # host's findings, as annotations (never in its own specs).
+    problems = [false, true].product(cases.keys, [true, false]).to_h do |annotated, name, with_file|
+      if annotated
+        ENV["GITHUB_ACTIONS"] = "true"
+        ENV.delete("HOMEBREW_TESTS")
+      end
       tap, head, default_prefix, third_party = cases.fetch(name)
+      log = logs.fetch(with_file)
       if with_file
         file.dirname.mkpath
         file.write([*log.drop(1), "", "HOMEBREW_VERSION: 5.0.0", ""].join("\n"))
@@ -1405,12 +1419,32 @@ RSpec.describe "brew internals", type: :system do
       [error, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
       error.dump
       parsed = Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] })
-      ["#{name}#{", with its log file" if with_file}", parsed.dig("foo", "problems")]
+      ["#{name}#{", with its log file" if with_file}#{", annotated" if annotated}", parsed.dig("foo", "problems")]
     end
-    # Without it, the log's own warning after a blank line ends it.
     expect(problems).to eq(problems.to_h do |key, _|
-      [key, [(key.end_with?(", with its log file") ? log : log.first(3)).join("\n")]]
+      [key, [logs.fetch(key.include?(", with its log file")).join("\n")]]
     end)
+  end
+
+  it "prints brew's warnings and errors under GitHub Actions as annotations, one line each, whose lines " \
+     "`Timed::Runner` reads as those brew prints otherwise" do
+    message = "foo 1.0 did not build: a::b\n100% done, not %0A\r\n\nend\n"
+    printed = [false, true].to_h do |annotated|
+      if annotated
+        ENV["GITHUB_ACTIONS"] = "true"
+        # Brew prints no annotations in its own specs.
+        ENV.delete("HOMEBREW_TESTS")
+      end
+      output = StringIO.new
+      allow($stderr).to receive(:puts) { |*lines| output.puts(*lines) }
+      Utils::Output.opoo message
+      Utils::Output.onoe message
+      Utils::Output.ofail message
+      [annotated, output.string.lines]
+    end
+    read = printed.transform_values { |lines| lines.flat_map { |line| Timed::Runner.plain_lines(line) } }
+    expect([printed.fetch(true).map { |line| line[/\A::\w+::/] }, read.fetch(true)])
+      .to eq([%w[::warning:: ::error:: ::error::], read.fetch(false)])
   end
 
   describe "`Tty`, which paints `brew build-times stats`, `histogram`, `runs` and `run`" do
