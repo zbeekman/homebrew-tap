@@ -1340,14 +1340,51 @@ RSpec.describe "brew internals", type: :system do
         .to eq([true, ["Resource", "Formula", "Bottle Manifest", "Patch"], true, true])
     end
 
-    it "include none from dependents brew rebuilds or upgrades after its heading, or a failed post-install" do
-      expect([brew_source("upgrade.rb").include?('oh1 "Checking for dependents of upgraded formulae..."'),
-              brew_source("upgrade.rb").include?(
-                "ohai \"\#{upgrade_verb} \#{Utils.pluralize(\"dependent\", upgradeable.count,",
-              ),
-              brew_source("formula_installer.rb")
-                .include?('opoo "The post-install step did not complete successfully"')])
-        .to eq([true, true, true])
+    it "include none from dependents brew rebuilds or upgrades after its heading, or a failed post-install",
+       :aggregate_failures do
+      # Brew prints a heading `DEPENDENTS` matches before it upgrades the
+      # dependents of upgraded formulae, whether one or more, and another
+      # before it checks for broken ones to rebuild: each before the work it
+      # announces, which prints a marker here.
+      markers = { upgrade_formulae: "<upgrading dependents>", check_broken_dependents: "<checking dependents>" }
+      markers.each do |method, marker|
+        allow(Homebrew::Upgrade).to receive(method) do
+          # Into brew's output, which `output` captures below.
+          puts marker # rubocop:disable RSpec/Output
+          []
+        end
+      end
+      run = lambda do |count|
+        formulae = lambda do |prefix|
+          Array.new(count) do |index|
+            # Brew checks for broken dependents only of non-core formulae.
+            formula("#{prefix}#{index}", tap: foo.tap) do
+              T.bind(self, T.class_of(Formula))
+              url "https://brew.sh/#{prefix}-1.0.tgz"
+            end
+          end
+        end
+        upgraded = formulae.call("up")
+        dependents = formulae.call("dep")
+        allow(FormulaInstaller).to receive(:installed).and_return(upgraded.to_set)
+        deps = Homebrew::Upgrade::Dependents.new(upgradeable: dependents, pinned: [], skipped: [])
+        installers = dependents.map { FormulaInstaller.new(it) }
+        Homebrew::Upgrade.upgrade_dependents(deps, upgraded, flags: [], prefetched_formula_installers: installers)
+      end
+      [1, 2].each do |count|
+        headings = satisfy("have each heading before its work for #{count} dependents") do |text|
+          text.lines(chomp: true).filter_map do |line|
+            Timed::Runner::DEPENDENTS.match?(line) ? :heading : markers.key(line)
+          end == [:heading, :upgrade_formulae, :heading, :check_broken_dependents]
+        end
+        expect { run.call(count) }.to output(headings).to_stdout
+      end
+      # Brew's warning for a post-install that fails however it runs.
+      installer = FormulaInstaller.new(foo)
+      allow(installer).to receive(:post_install_formula_path).and_raise(RuntimeError)
+      allow(installer).to receive(:puts)
+      expect { installer.post_install }
+        .to output(a_string_starting_with("#{Timed::Runner::POST_INSTALL_FAILED}\n")).to_stderr
     end
 
     it "include the error ending a verbose build's failure, which prints no log tail", :aggregate_failures do
