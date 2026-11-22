@@ -1344,8 +1344,16 @@ RSpec.describe "brew internals", type: :system do
        :aggregate_failures do
       # Brew prints a heading `DEPENDENTS` matches before it upgrades the
       # dependents of upgraded formulae, whether one or more, and another
-      # before it checks for broken ones to rebuild.
-      allow(Homebrew::Upgrade).to receive_messages(upgrade_formulae: [], check_broken_dependents: [])
+      # before it checks for broken ones to rebuild: each before the work it
+      # announces, which prints a marker here.
+      markers = { upgrade_formulae: "<upgrading dependents>", check_broken_dependents: "<checking dependents>" }
+      markers.each do |method, marker|
+        allow(Homebrew::Upgrade).to receive(method) do
+          # Into brew's output, which `output` captures below.
+          puts marker # rubocop:disable RSpec/Output
+          []
+        end
+      end
       run = lambda do |count|
         formulae = lambda do |prefix|
           Array.new(count) do |index|
@@ -1363,11 +1371,11 @@ RSpec.describe "brew internals", type: :system do
         installers = dependents.map { FormulaInstaller.new(it) }
         Homebrew::Upgrade.upgrade_dependents(deps, upgraded, flags: [], prefetched_formula_installers: installers)
       end
-      # Two lines `DEPENDENTS` matches in what brew prints for each number of
-      # dependents.
       [1, 2].each do |count|
-        headings = satisfy("have 2 lines `DEPENDENTS` matches for #{count} dependents") do |text|
-          text.lines(chomp: true).grep(Timed::Runner::DEPENDENTS).size == 2
+        headings = satisfy("have each heading before its work for #{count} dependents") do |text|
+          text.lines(chomp: true).filter_map do |line|
+            Timed::Runner::DEPENDENTS.match?(line) ? :heading : markers.key(line)
+          end == [:heading, :upgrade_formulae, :heading, :check_broken_dependents]
         end
         expect { run.call(count) }.to output(headings).to_stdout
       end
