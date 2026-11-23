@@ -1764,8 +1764,8 @@ RSpec.describe "brew internals", type: :system do
   end
 
   # `Timed::Receipts.installed_since?`, which `Timed::Runner::REINSTALLED`
-  # reads: a new receipt is a new file, and a failed reinstall leaves the old
-  # one in place.
+  # reads: a new receipt is a new file, and a failed reinstall, which moves
+  # the old keg away first, puts the old one back in place.
   it "writes each receipt as a new file, while a failed reinstall renames the old keg back, receipt and all" do
     receipt = installed_keg("foo", "1.0")/AbstractTab::FILENAME
     inode = receipt.stat.ino
@@ -1773,13 +1773,17 @@ RSpec.describe "brew internals", type: :system do
     rewritten = receipt.stat.ino != inode
     inode = receipt.stat.ino
     context = Homebrew::Reinstall.build_install_context(plain_formula("foo"), flags: [])
-    allow(context.formula_installer).to receive(:install).and_raise(RuntimeError, "failed")
+    moved = T.let(nil, T.nilable(T::Boolean))
+    expect(context.formula_installer).to receive(:install) do
+      moved = !receipt.exist?
+      raise "failed"
+    end
     begin
       Homebrew::Reinstall.reinstall_formula(context)
     rescue RuntimeError
       nil
     end
-    expect([rewritten, receipt.stat.ino]).to eq([true, inode])
+    expect([rewritten, moved, receipt.stat.ino]).to eq([true, true, inode])
   end
 
   # `Timed::Receipts.installed_since?`, which reads the install time in the
