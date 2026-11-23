@@ -722,7 +722,9 @@ RSpec.describe "brew internals", type: :system do
   it "asks about its plan by full name, against the named arguments as given" do
     # `UpgradeCmd` is brew's command, not a typo of `UpgradeTimed`.
     cmd = Homebrew::Cmd::UpgradeCmd.new(%w[--formula myalias]) # rubocop:disable Lint/NameTypo
-    named = plain_formula("foo", alias_path: CoreTap.instance.alias_dir/"myalias")
+    # A tapped formula, whose full name is not its name.
+    tap = Tap.fetch("user", "tap")
+    named = plain_formula("foo", tap:, alias_path: tap.alias_dir/"myalias")
     allow(cmd.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([named])
     # Brew plans to upgrade the named formula, which it names as it names its
     # plan.
@@ -731,7 +733,7 @@ RSpec.describe "brew internals", type: :system do
     end
     stop = Class.new(StandardError)
     expect(Homebrew::Install).to receive(:ask_prompt_needed?)
-      .with(hash_including(planned_names: %w[foo], requested_names: %w[myalias])).and_raise(stop)
+      .with(hash_including(planned_names: %w[user/tap/foo], requested_names: %w[myalias])).and_raise(stop)
     expect { cmd.run }.to raise_error(stop)
   end
 
