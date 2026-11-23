@@ -7,6 +7,17 @@ Or `brew tap zbeekman/tap`, trust the formula with
 `brew trust --formula zbeekman/tap/<formula>` and then `brew install <formula>`.
 See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
+## Formulae
+- `openjdk`: homebrew/core's `openjdk`, built from source on Intel macOS too,
+  which homebrew/core no longer supports. Formulae that depend on `openjdk`,
+  such as `antlr`, use it as long as its version matches homebrew/core's.
+  To switch to it:
+
+  ```sh
+  brew uninstall --ignore-dependencies openjdk
+  brew install zbeekman/tap/openjdk
+  ```
+
 ## Commands
 - [`brew build-times`](docs/build-times.md): show and annotate the log of how
   long formulae took to build from source or pour (as a table or, with
