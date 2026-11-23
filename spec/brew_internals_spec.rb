@@ -1603,11 +1603,18 @@ RSpec.describe "brew internals", type: :system do
     it "gives its installers, dependents check and plan the options `brew install-timed` gives them" do
       calls = [[Homebrew::Install, :formula_installers], [Homebrew::Upgrade, :dependants],
                [Homebrew::Install, :ask_formulae]]
-      keywords = [false, true].map do |timed|
-        given = options_given(install_command(%w[foo], [plain_formula("foo")], timed:), calls)
-        given.transform_values { |options| options.keys.sort - [:prompt] }
+      # Some on and some off, so a switch given another's value shows.
+      argv = %w[--force --keep-tmp --as-dependency --skip-link foo]
+      given = [false, true].map do |timed|
+        options_given(install_command(argv, [plain_formula("foo")], timed:), calls).to_h do |name, options|
+          # `brew install-timed` asks on its own, and makes installers only
+          # to plan with, whatever `dry_run:` brew gives them.
+          options = options.except(:prompt)
+          options[:dry_run] = :either if name == :formula_installers && options.key?(:dry_run)
+          [name, options]
+        end
       end
-      expect(keywords.last).to eq(keywords.first)
+      expect(given.last).to eq(given.first)
     end
   end
 
