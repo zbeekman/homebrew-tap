@@ -11,11 +11,11 @@ See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 - `openjdk`: homebrew/core's `openjdk`, built from source on Intel macOS too,
   which homebrew/core no longer supports. Formulae that depend on `openjdk`,
   such as `antlr`, use it as long as its version matches homebrew/core's.
-  To switch to it:
+  To switch an older homebrew/core `openjdk` to it, keeping the old one until
+  the new one has built (or `brew install` it if `openjdk` isn't installed):
 
   ```sh
-  brew uninstall --ignore-dependencies openjdk
-  brew install zbeekman/tap/openjdk
+  brew upgrade zbeekman/tap/openjdk
   ```
 
 ## Commands
