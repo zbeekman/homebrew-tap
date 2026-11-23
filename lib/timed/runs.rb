@@ -116,7 +116,10 @@ module Timed
 
       # `length` as a duration, with `+` if the run's end isn't logged.
       sig { returns(String) }
-      def length_text = "#{BuildLog.format_duration(length)}#{"+" if open_end?}"
+      def length_text
+        plus = "+" if open_end?
+        "#{BuildLog.format_duration(length)}#{plus}"
+      end
 
       # Seconds of the run that no build covers: brew's own work, such as
       # downloads and checks, between the builds, and failed builds, which
@@ -173,7 +176,11 @@ module Timed
           if match
             (runs[id || match[:run].to_s] ||= []) << build
           elsif build.skipped? && entry["log"].nil?
-            id ? (runs[id] ||= []) << build : skipped << build
+            if id
+              (runs[id] ||= []) << build
+            else
+              skipped << build
+            end
           end
         end
       end
@@ -233,21 +240,30 @@ module Timed
       name_width = nested.flatten(1).map { |_, name| name.length }.push(7).max.to_i
       columns = [[width, Plot::MIN_WIDTH].max - name_width - 20, MIN_COLUMNS].max
       length = run.length_text
-      axis = "  0#{length.rjust(columns - 1)}" unless run.skipped_only?
-      header = "#{heading("formula", name_width, paint)}  #{heading("status", 7, paint)}  " \
-               "#{heading("time", 7, paint, right: true)}#{axis}"
+      end_label = length.rjust(columns - 1)
+      axis = "  0#{end_label}" unless run.skipped_only?
+      formula_heading = heading("formula", name_width, paint)
+      status_heading = heading("status", 7, paint)
+      time_heading = heading("time", 7, paint, right: true)
+      header = "#{formula_heading}  #{status_heading}  #{time_heading}#{axis}"
       sections = nested.map do |builds|
         first = builds.fetch(0).first
         rows = builds.map do |build, name|
           style = Columns::STATUS_STYLES[build.status]
           seconds = build.seconds
           time = seconds ? BuildLog.format_duration(seconds) : "-"
-          row = "#{name.ljust(name_width)}  #{pad(build.status, 7, paint, style:)}  #{time.rjust(7)}"
+          status_cell = pad(build.status, 7, paint, style:)
+          row = "#{name.ljust(name_width)}  #{status_cell}  #{time.rjust(7)}"
           next row.rstrip if build.skipped?
 
           from = build.started - run.started
+          char = if build.status == "failed"
+            Plot::FAILED
+          else
+            "█"
+          end
           bar = Plot.timeline_bar(from, from + (seconds || 0.0), span: run.length, columns:,
-                                  char: (build.status == "failed") ? Plot::FAILED : "█", style:, paint:)
+                                  char:, style:, paint:)
           "#{row}  #{bar}"
         end
         [batch_heading(first), rows]
@@ -265,7 +281,8 @@ module Timed
       return ["Nothing ran: every formula was skipped."] if run.skipped_only?
 
       open_end = run.open_end?
-      ["Total #{"at least " if open_end}#{BuildLog.format_duration(run.length)}, " \
+      at_least = "at least " if open_end
+      ["Total #{at_least}#{BuildLog.format_duration(run.length)}, " \
        "#{BuildLog.format_duration(run.between)} of it between the bars.",
        "The gaps between the bars are brew's own work, such as downloads and checks.",
        *("The gaps also include builds with no logged end, such as failed builds." if run.unfinished_within?),
@@ -285,7 +302,8 @@ module Timed
       return "Skipped" if batch.nil?
       return "Batch #{batch} (--last)" if label == "last"
 
-      "Batch #{batch}#{" (#{label})" if label && label != "main"}"
+      named = " (#{label})" if label && label != "main"
+      "Batch #{batch}#{named}"
     end
     private_class_method :batch_heading
 
@@ -332,7 +350,8 @@ module Timed
 
       parent = build.dependency_of
       name = if depth.positive?
-        "#{"  " * (depth - 1)}└ #{build.name}"
+        indent = "  " * (depth - 1)
+        "#{indent}└ #{build.name}"
       elsif parent && parent != build.name
         "#{build.name} (for #{parent})"
       else

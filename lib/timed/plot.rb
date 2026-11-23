@@ -202,7 +202,11 @@ module Timed
 
       label_width = values.length.to_s.length
       columns = [width, MIN_WIDTH].max - label_width - 2
-      axis = linear ? linear_axis(values, longest, columns) : log_axis(shortest, longest, values.length, columns)
+      axis = if linear
+        linear_axis(values, longest, columns)
+      else
+        log_axis(shortest, longest, values.length, columns)
+      end
       if smooth
         curve = curve(values.map { |seconds| Math.log(seconds) }, axis)
         # Rounded first, so a peak of 1 plus rounding error is not 2.
@@ -215,8 +219,9 @@ module Timed
         grid = bars(binned, axis.per_bin, top, quartiles ? quartile_cuts(values) : nil)
       end
 
+      blank_label = " " * label_width
       rows = grid.each_with_index.map do |cells, row|
-        gutter = row.zero? ? "#{top.to_s.rjust(label_width)} ┤" : "#{" " * label_width} │"
+        gutter = row.zero? ? "#{top.to_s.rjust(label_width)} ┤" : "#{blank_label} │"
         "#{gutter}#{paint_cells(cells, paint)}".rstrip
       end
       rows + x_axis(axis, label_width, columns)
@@ -296,7 +301,12 @@ module Timed
     sig { params(logs: T::Array[Float], axis: Axis).returns(T::Array[Float]) }
     def self.curve(logs, axis)
       bin_width = axis.span / axis.bins
-      bandwidth = bandwidth(logs) || (axis.linear ? bin_width / Math.exp(logs.fetch(0)) : bin_width)
+      bandwidth = bandwidth(logs)
+      bandwidth ||= if axis.linear
+        bin_width / Math.exp(logs.fetch(0))
+      else
+        bin_width
+      end
       dots = axis.columns * 2
       (0...dots).map do |dot|
         middle = axis.low + ((dot + 0.5) * axis.span / dots)
@@ -316,11 +326,19 @@ module Timed
     }
     def self.bars(binned, per_bin, top, cuts)
       columns = binned.flat_map do |bin|
-        eighths = bin.empty? ? 0 : [(bin.length * HEIGHT * 8.0 / top).round, 1].max
+        eighths = if bin.empty?
+          0
+        else
+          [(bin.length * HEIGHT * 8.0 / top).round, 1].max
+        end
         style = band(BuildLog.median(bin), cuts:) unless bin.empty?
         column = (0...HEIGHT).map do |row|
           filled = (eighths - ((HEIGHT - 1 - row) * 8)).clamp(0, 8)
-          filled.zero? ? [" ", nil] : [BLOCKS.fetch(filled - 1), style]
+          if filled.zero?
+            [" ", nil]
+          else
+            [BLOCKS.fetch(filled - 1), style]
+          end
         end
         [column] * per_bin
       end
@@ -337,8 +355,16 @@ module Timed
       levels = curve.map { |count| (count * HEIGHT * 4 / top).round.clamp(0, HEIGHT * 4) }
       bits = Hash.new(0)
       levels.each_with_index do |level, dot|
-        previous = dot.zero? ? level : levels.fetch(dot - 1)
-        heights = (level > previous) ? (previous + 1)..level : level..[previous - 1, level].max
+        previous = if dot.zero?
+          level
+        else
+          levels.fetch(dot - 1)
+        end
+        heights = if level > previous
+          (previous + 1)..level
+        else
+          level..[previous - 1, level].max
+        end
         heights.each do |height|
           next if height < 1
 
@@ -375,7 +401,11 @@ module Timed
       end
       if axis.cover?(GREEN_UP_TO)
         mark = axis.column(GREEN_UP_TO)
-        line[mark] = (line.fetch(mark) == "┬") ? "┼" : "┴"
+        line[mark] = if line.fetch(mark) == "┬"
+          "┼"
+        else
+          "┴"
+        end
         rightwards = "└ #{MARK_LABEL}"
         mark_label = if mark + rightwards.length <= room
           (" " * mark) + rightwards
@@ -384,7 +414,8 @@ module Timed
         end
       end
       texts = [labels.rstrip, mark_label].compact.reject(&:empty?)
-      ["#{"0".rjust(label_width)} └#{line.join}", *texts.map { |text| "#{" " * (label_width + 2)}#{text}" }]
+      indent = " " * (label_width + 2)
+      ["#{"0".rjust(label_width)} └#{line.join}", *texts.map { |text| "#{indent}#{text}" }]
     end
     private_class_method :x_axis
 
@@ -425,11 +456,21 @@ module Timed
              paint: T.nilable(Paint)).returns(String)
     }
     def self.timeline_bar(from, to, span:, columns:, char: "█", style: nil, paint: nil)
-      scale = span.positive? ? columns / span : 0.0
+      scale = if span.positive?
+        columns / span
+      else
+        0.0
+      end
       first = (from * scale).floor.clamp(0, columns - 1)
       last = (to * scale).ceil.clamp(first + 1, columns)
       bar = char * (last - first)
-      "#{" " * first}#{(style && paint) ? paint.call(bar, style) : bar}"
+      padding = " " * first
+      painted = if style && paint
+        paint.call(bar, style)
+      else
+        bar
+      end
+      "#{padding}#{painted}"
     end
 
     sig { params(cells: T::Array[Cell], paint: T.nilable(Paint)).returns(String) }
@@ -437,7 +478,11 @@ module Timed
       cells.chunk_while { |before, after| before.last == after.last }.map do |run|
         text = run.map(&:first).join
         style = run.fetch(0).last
-        (style && paint) ? paint.call(text, style) : text
+        if style && paint
+          paint.call(text, style)
+        else
+          text
+        end
       end.join
     end
     private_class_method :paint_cells

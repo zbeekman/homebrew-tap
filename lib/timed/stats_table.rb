@@ -57,13 +57,22 @@ module Timed
     def self.row(log, name, kind)
       latest = log.builds(name).last || {}
       summary = BuildLog.summarise(log.durations(name, status: kind))
-      times = summary ? [summary.median, summary.mean, summary.mode, summary.stdev] : []
+      times = if summary
+        [summary.median, summary.mean, summary.mode, summary.stdev]
+      else
+        []
+      end
+      statistics = if times.empty?
+        %w[- - - -]
+      else
+        times.map { |seconds| BuildLog.format_duration(seconds.to_f) }
+      end
       Row.new(
         name:,
         kind:,
         n:            summary&.n || 0,
         summary:,
-        statistics:   times.empty? ? %w[- - - -] : times.map { |seconds| BuildLog.format_duration(seconds.to_f) },
+        statistics:,
         median:       summary&.median || 0.0,
         mean:         summary&.mean || 0.0,
         estimate:     log.estimate(name, pour: kind == "poured") || log.fallback_estimate,
@@ -167,13 +176,16 @@ module Timed
         *%w[median mean mode stdev].map { |name| heading(name, 8, paint, right: true) },
         heading("estimate", 9, paint, right: true),
       ]
-      header = "#{columns.join(" ")}  #{heading("last", last_width, paint)}  #{heading("trend", 5, paint)}"
+      last_heading = heading("last", last_width, paint)
+      trend_heading = heading("trend", 5, paint)
+      header = "#{columns.join(" ")}  #{last_heading}  #{trend_heading}"
       [header] + rows.map { |row| line(row, last_width, paint, cuts) }
     end
 
     sig { params(row: Row, last_width: Integer, paint: Plot::Paint, cuts: T.nilable(T::Array[Float])).returns(String) }
     def self.line(row, last_width, paint, cuts)
-      estimate = "#{BuildLog.format_duration(row.estimate)}#{"?" if row.guess}"
+      guess_mark = "?" if row.guess
+      estimate = "#{BuildLog.format_duration(row.estimate)}#{guess_mark}"
       kind = row.kind
       columns = [
         row.name.ljust(NAME_WIDTH),
@@ -184,7 +196,8 @@ module Timed
                                    italic: row.guess),
       ]
       last = pad(row.last, last_width, paint, style: row.last_failed ? :red : nil)
-      "#{columns.join(" ")}  #{last}  #{Plot.sparkline(row.trend, paint:, cuts:)}"
+      trend = Plot.sparkline(row.trend, paint:, cuts:)
+      "#{columns.join(" ")}  #{last}  #{trend}"
     end
     private_class_method :line
 
@@ -195,13 +208,19 @@ module Timed
         .returns(T::Array[String])
     }
     def self.estimate_lines(log, estimates, paint: Columns::PAINT)
-      header = "#{heading("formula", NAME_WIDTH, paint)} #{heading("version", 12, paint)} " \
-               "#{heading("estimate", 9, paint, right: true)} #{heading("actual", 9, paint, right: true)}  " \
-               "#{heading("model", 5, paint)} #{heading("date", 4, paint)}"
+      formula_heading = heading("formula", NAME_WIDTH, paint)
+      version_heading = heading("version", 12, paint)
+      estimate_heading = heading("estimate", 9, paint, right: true)
+      actual_heading = heading("actual", 9, paint, right: true)
+      model_heading = heading("model", 5, paint)
+      date_heading = heading("date", 4, paint)
+      header = "#{formula_heading} #{version_heading} #{estimate_heading} #{actual_heading}  " \
+               "#{model_heading} #{date_heading}"
       rows = estimates.map do |name, estimate|
         version = estimate.fetch("version")
         actual = log.durations(name, status: "built", version:).last
-        "#{name.ljust(NAME_WIDTH)} #{version.ljust(12)} #{seconds_cell(estimate.fetch("seconds").to_f, paint)} " \
+        estimated = seconds_cell(estimate.fetch("seconds").to_f, paint)
+        "#{name.ljust(NAME_WIDTH)} #{version.ljust(12)} #{estimated} " \
           "#{seconds_cell(actual, paint)}  #{estimate["model"]} #{estimate["date"]}"
       end
       [header, *rows]

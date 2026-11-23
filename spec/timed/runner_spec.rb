@@ -1579,7 +1579,10 @@ RSpec.describe Timed::Runner do
     it "logs a dependency's parent, by its short name, and leaves only the parent's own time in its install time, " \
        "counting each second once however deep the dependencies" do
       dependency = ->(parent, name) { "==> Installing #{parent} dependency: #{name} (1.0)" }
-      summary = ->(name, built = nil) { "🍺  /prefix/Cellar/#{name}/1.0: 4KB#{", built in #{built}" if built}" }
+      summary = lambda do |name, built = nil|
+        build_time = ", built in #{built}" if built
+        "🍺  /prefix/Cellar/#{name}/1.0: 4KB#{build_time}"
+      end
       times = ->(**seconds) { ["==> Installation times", *seconds.map { |name, value| "#{name}  #{value} s" }] }
       outputs = {
         "one dependency"                => [

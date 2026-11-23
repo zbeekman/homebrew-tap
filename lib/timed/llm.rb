@@ -374,7 +374,11 @@ module Timed
       raise UsageError, "`--llm-url` needs `--llm-model`: there is no default model for it." unless model
 
       uri = parse_url(url || adapter.url)
-      addresses = (uri.scheme == "http") ? local_addresses(uri, resolver) : []
+      addresses = if uri.scheme == "http"
+        local_addresses(uri, resolver)
+      else
+        []
+      end
       Settings.new(provider:, url: uri, model:, key:, addresses:, timeout: timeout || BUDGET_SECONDS, effort:)
     end
 
@@ -427,10 +431,15 @@ module Timed
     def self.post(request, timeout)
       uri = request.uri
       body = +""
-      too_large = "the response is larger than #{MAX_RESPONSE_BYTES / 1024 / 1024} MiB"
+      mebibytes = MAX_RESPONSE_BYTES / 1024 / 1024
+      too_large = "the response is larger than #{mebibytes} MiB"
       begin
         Timeout.timeout(timeout) do
-          http = (uri.scheme == "https") ? https_connection(uri, timeout) : http_connection(request, timeout)
+          http = if uri.scheme == "https"
+            https_connection(uri, timeout)
+          else
+            http_connection(request, timeout)
+          end
           begin
             # Read in chunks, decoded, to stop at the limit rather than after
             # buffering all of an untrusted answer.

@@ -88,7 +88,12 @@ module Homebrew
         end
         # What `brew install --dry-run` prints about the casks, and `brew
         # install` before it asks about them: the dependencies it would install.
-        cask_dependencies = Install.print_dry_run_casks(args.dry_run? ? casks : new_casks | upgrading,
+        printed_casks = if args.dry_run?
+          casks
+        else
+          new_casks | upgrading
+        end
+        cask_dependencies = Install.print_dry_run_casks(printed_casks,
                                                         skip_cask_deps:    args.skip_cask_deps?,
                                                         include_installed: !args.dry_run?)
 

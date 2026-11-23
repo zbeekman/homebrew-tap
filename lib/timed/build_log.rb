@@ -167,7 +167,8 @@ module Timed
           # a `Rational` is a number here but a string in JSON.
           written = JSON.parse(after)
           validate!(target, written)
-          target.atomic_write("#{JSON.pretty_generate(sort_keys(written))}\n")
+          json = JSON.pretty_generate(sort_keys(written))
+          target.atomic_write("#{json}\n")
           target.chmod(0600)
         end
         result
@@ -223,7 +224,11 @@ module Timed
     def self.median(values)
       sorted = values.sort
       middle = sorted.length / 2
-      sorted.length.odd? ? sorted.fetch(middle) : (sorted.fetch(middle - 1) + sorted.fetch(middle)) / 2
+      if sorted.length.odd?
+        sorted.fetch(middle)
+      else
+        (sorted.fetch(middle - 1) + sorted.fetch(middle)) / 2
+      end
     end
 
     # Sample standard deviation; zero for a single value.

@@ -144,7 +144,13 @@ module Timed
         # at a time.
         ready = remaining.select { |_, waiting| waiting.empty? }.keys
         last_name = order.last
-        same_verb = ->(ready_name) { (last_name && verbs[ready_name] == verbs[last_name]) ? 0 : 1 }
+        same_verb = lambda do |ready_name|
+          if last_name && verbs[ready_name] == verbs[last_name]
+            0
+          else
+            1
+          end
+        end
         name = ready.min_by do |ready_name|
           estimate = estimates.fetch(ready_name)
           if pours.include?(ready_name)

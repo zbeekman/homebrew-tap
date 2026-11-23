@@ -226,7 +226,8 @@ module Timed
           stopped = T.let(false, T::Boolean)
           if names.any?
             heading = if call
-              "#{call.verb.capitalize.delete_suffix("e")}ing #{call.what.downcase}"
+              stem = call.verb.capitalize.delete_suffix("e")
+              "#{stem}ing #{call.what.downcase}"
             else
               "Running batch #{index} of #{batches.length}"
             end
@@ -241,7 +242,11 @@ module Timed
               joins = run_names && !call&.reinstall? &&
                       (call || !pour_flags || pours.include?(run_names.fetch(0)) == pours.include?(name)) &&
                       !(apart && call.nil? && apart?(name, run_names, deps, planned))
-              joins ? run_names << name : runs << [name]
+              if joins
+                run_names << name
+              else
+                runs << [name]
+              end
             end
             calls = runs.map do |run_names|
               next [call.flags, run_names] if call
@@ -322,7 +327,11 @@ module Timed
               if formula_installed && DONE.include?(build["status"])
                 builds[short] = build
               elsif !formula_installed
-                (call ? (failed_after[call.label] ||= []) : failed) << name
+                if call
+                  (failed_after[call.label] ||= []) << name
+                else
+                  failed << name
+                end
                 # A formula brew never named started, as far as the log
                 # knows, when its batch did.
                 builds[short] = build.merge("status"  => "failed",
@@ -390,8 +399,8 @@ module Timed
         command = finish&.call(left_in_batches) if left_in_batches.any?
         if not_finished.any?
           to_finish = "\nTo finish, run:\n  #{command}" if command
-          opoo "Interrupted; not finished or logged: #{"the dependencies of " if dependencies_only}" \
-               "#{not_finished.join(" ")}#{to_finish}"
+          of = "the dependencies of " if dependencies_only
+          opoo "Interrupted; not finished or logged: #{of}#{not_finished.join(" ")}#{to_finish}"
         elsif command
           opoo "Interrupted; to finish, run:\n  #{command}"
         end
@@ -417,8 +426,12 @@ module Timed
           maybe = call.candidates&.reject(&:latest_version_installed?) || []
           deps = deps.merge(maybe.to_h { |formula| [formula.full_name, call.deps.call(formula)] })
           ready = maybe.map(&:full_name).reject { |name| deps.fetch(name, []).intersect?(blocked) }
-          finish_left = "; to finish what may be left, run:\n  #{call.finish.call(ready)}" if ready.any?
-          opoo "#{call.what} not worked out, as Ctrl-C stopped that#{finish_left || "."}"
+          finish_left = if ready.any?
+            "; to finish what may be left, run:\n  #{call.finish.call(ready)}"
+          else
+            "."
+          end
+          opoo "#{call.what} not worked out, as Ctrl-C stopped that#{finish_left}"
           report_left(call, maybe.map(&:full_name) - ready, deps, blocked)
           blocked |= maybe.map(&:full_name)
         end
@@ -431,15 +444,15 @@ module Timed
         failed_by_verb.each_with_index do |(failed_verb, names), index|
           count = Utils.pluralize("formula", names.length, include_count: true)
           then_run = "\nTo finish, run:\n  #{command}" if command && index == failed_by_verb.length - 1
-          ofail "#{dependencies_only ? "The dependencies of #{count}" : count} did not #{failed_verb}: " \
-                "#{names.join(" ")}#{then_run}"
+          whose = dependencies_only ? "The dependencies of #{count}" : count
+          ofail "#{whose} did not #{failed_verb}: #{names.join(" ")}#{then_run}"
         end
         (after || []).each do |call|
           names = failed_after.fetch(call.label, [])
           next if names.empty?
 
-          ofail "#{Utils.pluralize(call.noun, names.length, include_count: true)} did not #{call.verb}: " \
-                "#{names.join(" ")}\nTo finish, run:\n  #{call.finish.call(names)}"
+          counted = Utils.pluralize(call.noun, names.length, include_count: true)
+          ofail "#{counted} did not #{call.verb}: #{names.join(" ")}\nTo finish, run:\n  #{call.finish.call(names)}"
         end
       end
       # Even if brew finished anyway, so that whatever runs this stops too.
@@ -558,7 +571,12 @@ module Timed
           "#{whose} #{names.join(", ")} did not #{missing_verb}"
         end
         command = finish&.call([name])
-        then_run = "\nOnce #{(missing.length == 1) ? "it does" : "they do"}, run:\n  #{command}" if command
+        they_do = if missing.length == 1
+          "it does"
+        else
+          "they do"
+        end
+        then_run = "\nOnce #{they_do}, run:\n  #{command}" if command
         opoo "Skipping #{name}: #{what.join(" and ")}#{then_run}"
         true
       end
@@ -656,7 +674,8 @@ module Timed
 
       # In one pass, so a decoded `%` never starts another escape.
       message = match[:message].to_s.gsub(/%(?:25|0A|0D)/, "%25" => "%", "%0A" => "\n", "%0D" => "\r")
-      "#{match[:type].to_s.capitalize}: #{message}".lines.map(&:chomp)
+      type = match[:type].to_s.capitalize
+      "#{type}: #{message}".lines.map(&:chomp)
     end
 
     # Where brew starts on a formula, with any options after the name: each
@@ -728,11 +747,12 @@ module Timed
     # reports by support tier. A warning's annotation reads as the warning
     # (`plain_lines`).
     LOG_START = /\A\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}\z/
+    AFTER_LOG_STARTS = ["READ THIS: ", "If reporting this issue", "These open issues may also help:",
+                        "Before reporting this issue, read:", "Report this issue to the ",
+                        "Report problems specific to this configuration ", "Please do not file Homebrew issues ",
+                        "Do not file issues for this configuration."].freeze
     AFTER_LOG = /
-      \A(?:#{Regexp.union("READ THIS: ", "If reporting this issue", "These open issues may also help:",
-                          "Before reporting this issue, read:", "Report this issue to the ",
-                          "Report problems specific to this configuration ", "Please do not file Homebrew issues ",
-                          "Do not file issues for this configuration.")}
+      \A(?:#{Regexp.union(*AFTER_LOG_STARTS)}
       |\S+'s\sformula\s(?:was\sbuilt|is\sdeprecated|is\sdisabled)
       |This\sis\sa\sTier\s\d\sconfiguration:)
     /x

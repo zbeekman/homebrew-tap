@@ -158,7 +158,15 @@ RSpec.describe Timed::Command do
         end
         # The cask brew uninstalls then is the new cask with the artifacts its
         # install recorded.
-        expect(loaded).to eq(runs.to_h { |run| [run, (run == [true, false, true]) ? "2.0" : "1.0"] })
+        expected = runs.to_h do |run|
+          version = if run == [true, false, true]
+            "2.0"
+          else
+            "1.0"
+          end
+          [run, version]
+        end
+        expect(loaded).to eq(expected)
       end
 
       it "gives a reinstall of a cask that isn't trusted the artifacts its install recorded, with the new " \
@@ -1535,7 +1543,7 @@ RSpec.describe Timed::Command do
     end
 
     it "rejects a formula guessed twice, also under another name" do
-      resolve = ->(name) { (name == "llvm@21") ? "llvm" : name }
+      resolve = ->(name) { { "llvm@21" => "llvm" }.fetch(name, name) }
       expect { described_class.guesses(%w[llvm=1h llvm@21=2h], resolve:) }
         .to raise_error(UsageError, "Invalid usage: `--guess` gives `llvm` more than once.")
     end

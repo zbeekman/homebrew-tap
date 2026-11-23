@@ -118,7 +118,11 @@ module Homebrew
         # refuses, unless it refuses them all), not of their dependencies. The
         # outdated dependents it finds that the batches don't upgrade are
         # upgraded after them.
-        checked = planned.empty? ? [] : roots.reject { |formula| exclude.include?(formula.full_name) }
+        checked = if planned.empty?
+          []
+        else
+          roots.reject { |formula| exclude.include?(formula.full_name) }
+        end
         dependants = dependants(checked)
         dependents = dependants.upgradeable.reject { |formula| (planned + exclude).include?(formula.full_name) }
         Timed::Command.show_plan("upgrade", result, estimates, excluded:, casks: any_casks,

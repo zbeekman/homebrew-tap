@@ -6,18 +6,22 @@
 # config does not inherit that override.
 # rubocop:disable Sorbet/BlockMethodDefinition
 
+require "api/source_download"
 require "ask"
 require "caveats"
 require "cask/cask"
 require "cmd/install"
 require "cmd/reinstall"
 require "cmd/upgrade"
+require "download_queue"
 require "messages"
 require "open3"
+require "system_config"
 require "tab"
 require_relative "../cmd/install-timed"
 require_relative "../lib/timed/command"
 require_relative "../lib/timed/runner"
+require_relative "support/bottles"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
 # change fails here instead of during a real upgrade. When one fails, first
@@ -81,16 +85,14 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "tap commands" do
+    # How `brew` finds each of this tap's commands, every `cmd/*.rb`.
     it "are only found when executable" do
       dir = mktmpdir
       %w[plain runnable].each { |name| FileUtils.touch dir/"#{name}.rb" }
       (dir/"runnable.rb").chmod(0755)
-      lookup = %w[plain runnable].to_h { |name| [name, which("#{name}.rb", [dir])] }
-      source = brew_source("commands.rb")
-      uses = ["which(\"\#{cmd}.rb\", tap_cmd_directories)", "select(&:executable?)"].map do |code|
-        source.include?(code)
-      end
-      expect([lookup, uses]).to eq([{ "plain" => nil, "runnable" => dir/"runnable.rb" }, [true, true]])
+      allow(Commands).to receive(:tap_cmd_directories).and_return([dir])
+      found = %w[plain runnable].to_h { |name| [name, Commands.external_ruby_v2_cmd_path(name)] }
+      expect(found).to eq("plain" => nil, "runnable" => dir/"runnable.rb")
     end
 
     it "in this tap are all executable" do
@@ -158,7 +160,11 @@ RSpec.describe "brew internals", type: :system do
 
   it "covers every flight block stanza with Cask::Artifact::AbstractFlightBlock" do
     keys = Cask::DSL::ARTIFACT_BLOCK_CLASSES.flat_map do |klass|
-      (klass < Cask::Artifact::AbstractFlightBlock) ? [klass.dsl_key, klass.uninstall_dsl_key] : [klass]
+      if klass < Cask::Artifact::AbstractFlightBlock
+        [klass.dsl_key, klass.uninstall_dsl_key]
+      else
+        [klass]
+      end
     end
     expect(keys).to contain_exactly(:preflight, :postflight, :uninstall_preflight, :uninstall_postflight)
   end
@@ -268,7 +274,8 @@ RSpec.describe "brew internals", type: :system do
       on_upgrades = [nil, ":quit", ":signal", '"signal"', "[:signal]", '["signal"]']
       modes = { "upgrade" => { upgrade: true }, "reinstall" => { reinstall: true }, "uninstall" => {} }
       actual = on_upgrades.to_h do |on_upgrade|
-        stanza = %Q(uninstall signal: ["TERM", "com.foo"]#{", on_upgrade: #{on_upgrade}" if on_upgrade})
+        option = ", on_upgrade: #{on_upgrade}" if on_upgrade
+        stanza = %Q(uninstall signal: ["TERM", "com.foo"]#{option})
         [on_upgrade, modes.transform_values { |mode| dispatched(stanza, **mode).include?([:uninstall, :signal]) }]
       end
       named = { "upgrade" => true, "reinstall" => true, "uninstall" => true }
@@ -679,34 +686,124 @@ RSpec.describe "brew internals", type: :system do
     lines.index(first)&.then { |index| lines[index, count] }
   end
 
-  def upgrade_lines(first, count) = lines_from("cmd/upgrade.rb", first, count)
+  # A formula named `name` with nothing more than a URL, in the tap `tap`
+  # (homebrew/core without one).
+  def plain_formula(name, tap: nil, alias_path: nil)
+    formula(name, tap:, alias_path:) do
+      T.bind(self, T.class_of(Formula))
+      url "https://brew.sh/#{name}-1.0.tgz"
+    end
+  end
 
+  # What `brew upgrade-timed` upgrades (`UpgradeTimed#run`'s `upgradeable`
+  # and `roots`), as brew does.
   it "drops pinned formulae, then upgrades each to its alias's new target unless that is up to date" do
-    expected = ["pinned = outdated.select(&:pinned?)", "outdated -= pinned",
-                "formulae_to_install = outdated.map do |f|", "f_latest = f.latest_formula",
-                "if f_latest.latest_version_installed?", "f", "else", "f_latest", "end", "end"]
-    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
-      .to eq("cmd/upgrade.rb" => expected)
+    # `UpgradeCmd` is brew's command, not a typo of `UpgradeTimed`.
+    cmd = Homebrew::Cmd::UpgradeCmd.new([]) # rubocop:disable Lint/NameTypo
+    pinned, renamed, current, target, installed = %w[pinned renamed current target installed].map do |name|
+      plain_formula(name)
+    end
+    allow(pinned).to receive(:pinned?).and_return(true)
+    allow(renamed).to receive(:latest_formula).and_return(target)
+    allow(current).to receive(:latest_formula).and_return(installed)
+    allow(installed).to receive(:latest_version_installed?).and_return(true)
+    allow(cmd).to receive(:formula_outdated?).and_return(true)
+    allow(Homebrew::Install).to receive(:perform_preinstall_checks_once)
+    allow(Homebrew::Upgrade).to receive_messages(
+      formula_installers: [instance_double(FormulaInstaller)],
+      dependants:         Homebrew::Upgrade::Dependents.new(upgradeable: [], pinned: [], skipped: []),
+    )
+    context = cmd.formulae_upgrade_context([pinned, renamed, current], show_upgrade_summary: false)
+    expect([context&.formulae_to_install, context&.pinned_formulae]).to eq([[target, current], [pinned]])
   end
 
-  it "asks by the named arguments as given, and planned names made full names only for named formulae" do
-    expected = ["planned_names: planned_fetch_names.map do |planned_name|",
-                "formulae.find { |formula| formula.full_specified_name == planned_name }&.full_name || planned_name",
-                "end,", "requested_names: args.named,"]
-    expect("cmd/upgrade.rb" => upgrade_lines(expected.fetch(0), expected.length))
-      .to eq("cmd/upgrade.rb" => expected)
+  # Whether `brew upgrade-timed` asks before it upgrades (`UpgradeTimed#run`'s
+  # `Install.ask_prompt_needed?` call), as brew does.
+  it "asks about its plan by full name, against the named arguments as given" do
+    # `UpgradeCmd` is brew's command, not a typo of `UpgradeTimed`.
+    cmd = Homebrew::Cmd::UpgradeCmd.new(%w[--formula myalias]) # rubocop:disable Lint/NameTypo
+    # A tapped formula, whose full name is not its name.
+    tap = Tap.fetch("user", "tap")
+    named = plain_formula("foo", tap:, alias_path: tap.alias_dir/"myalias")
+    allow(cmd.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([named])
+    # Brew plans to upgrade the named formula, which it names as it names its
+    # plan.
+    allow(cmd).to receive(:upgrade_outdated_formulae!) do |formulae|
+      cmd.final_upgrade_summary.version_changes.concat(cmd.formula_version_changes(formulae))
+    end
+    stop = Class.new(StandardError)
+    expect(Homebrew::Install).to receive(:ask_prompt_needed?)
+      .with(hash_including(planned_names: %w[user/tap/foo], requested_names: %w[myalias])).and_raise(stop)
+    expect { cmd.run }.to raise_error(stop)
   end
 
+  # `Timed::Planner.split`, which splits an upgrade batch before a slow
+  # keg-only formula that follows another, as brew moves it to the front,
+  # in the lists `UpgradeTimed#run` and `InstallTimed#run` (its `:upgrade`
+  # batches) give it as `keg_only:`.
   it "upgrades keg-only formulae first" do
-    partition_lines = brew_source("upgrade.rb").lines.grep(/partition\(&:keg_only\?\)/).map(&:strip)
-    expect("upgrade.rb" => partition_lines)
-      .to eq("upgrade.rb" => ["formulae_to_install.replace(formulae_to_install.partition(&:keg_only?).flatten(1))"])
+    keg_only = formula("keg-only") do
+      T.bind(self, T.class_of(Formula))
+      url "https://brew.sh/keg-only-1.0.tgz"
+      keg_only "it is"
+    end
+    # The order brew makes the installers in, which it upgrades in.
+    made = []
+    allow(Homebrew::Upgrade).to receive(:create_formula_installer) do |formula|
+      made << formula.name
+      raise CannotInstallFormulaError, formula.name
+    end
+    Homebrew::Upgrade.formula_installers([plain_formula("plain"), keg_only], flags: [])
+    expect(made).to eq(%w[keg-only plain])
   end
 
-  it "prints `Installation times` only if anything was installed, as `brew reinstall` finishes after the " \
-     "dependents check, which `Timed::Runner` takes as brew not having stopped early", :aggregate_failures do
+  # `Timed::Runner.run`, which takes a failed call that printed `Installation
+  # times` as one brew finished, not stopped early.
+  it "prints `Installation times` only if anything was installed" do
     expect { Messages.new.display_install_times }.not_to output.to_stdout
-    expect(brew_source("cmd/reinstall.rb")[/rescue BuildError.*Install\.finish_installation\(/m]).to be_present
+  end
+
+  # `Timed::Runner.run`'s `stops_at_failure`, which `ReinstallTimed#run`
+  # passes and reads `stopped_early` from to skip its last casks, and which
+  # takes a failed call that printed `Installation times` (`INSTALL_TIMES`,
+  # which brew prints for the `--display-times` it passes) as one brew
+  # finished, not stopped early.
+  it "finishes `brew reinstall --display-times`, printing `Installation times`, after the dependents, but never " \
+     "after a failed build", :aggregate_failures do
+    foo = plain_formula("foo")
+    allow(Homebrew::Install).to receive_messages(perform_preinstall_checks_once: nil, ask_formulae: nil)
+    # Nothing to download or clean up.
+    allow(Homebrew::Install).to receive(:enqueue_formulae) { |installers, **| installers }
+    allow(Homebrew::Cleanup).to receive_messages(install_clean!: nil, periodic_clean!: nil)
+    marker = "<upgrading dependents>"
+    allow(Homebrew::Upgrade).to receive(:upgrade_dependents) do
+      # Into brew's output, which `output` captures below.
+      puts marker # rubocop:disable RSpec/Output
+      []
+    end
+    # The marker and the times heading brew prints, in order, after each kind
+    # of failure.
+    printed = { BuildError => [], RuntimeError => [marker, Timed::Runner::INSTALL_TIMES] }
+    [BuildError.new(foo, "make", [], {}), RuntimeError.new("failed")].each do |error|
+      # Brew's record of an installed formula, as its install leaves it, so
+      # it has times to print; a new one each run, so none is left behind.
+      messages = Messages.new
+      messages.package_installed("foo", 1.0)
+      allow(Homebrew).to receive(:messages).and_return(messages)
+      allow(Homebrew::Reinstall).to receive(:reinstall_formula).and_raise(error)
+      cmd = Homebrew::Cmd::Reinstall.new(%w[--formula --display-times foo])
+      allow(cmd.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([foo])
+      expected = printed.fetch(error.class)
+      order = satisfy("print #{expected} after a #{error.class}") do |text|
+        text.lines(chomp: true).select { |line| [marker, Timed::Runner::INSTALL_TIMES].include?(line) } == expected
+      end
+      expect do
+        cmd.run
+      rescue BuildError
+        # Brew's global handler reports it.
+        nil
+      end.to output(order).to_stdout
+    end
   end
 
   it "prints `Installation times` in a fixed format" do
@@ -727,14 +824,33 @@ RSpec.describe "brew internals", type: :system do
       .to eq("llvm" => 2811.4, "a-formula-with-a-long-name" => 123456.789)
   end
 
-  it "times a formula's install from before it installs its dependencies, each named after the full name of the " \
-     "formula it is a dependency of, so `Timed::Runner.parse` takes their times from its time" do
-    install = brew_source("formula_installer.rb")[/^  def install\n.*?^  end$/m].to_s
-    expect([install.match?(/start_time = Time\.now\n.*install_dependencies\(deps\)\n.*end_time - start_time\)/m),
-            install.include?("Homebrew.messages.package_installed(formula.name, end_time - start_time)"),
-            brew_source("formula_installer.rb")
-              .include?("oh1 \"\#{action} \#{formula.full_name} dependency: \#{Formatter.identifier(dep.name)} \"")])
-      .to eq([true, true, true])
+  # `Timed::Runner.parse`: `DEPENDENCY_HEADING`, `INSTALL_TIME` and
+  # `Parser#builds`, which takes each dependency's time from its parent's.
+  it "times a formula's install from before it installs its dependencies, each named after the formula it is a " \
+     "dependency of, so `Timed::Runner.parse` takes their times from its time" do
+    foo, bar = %w[foo bar].map { |name| plain_formula(name, tap: Tap.fetch("user", "tap")) }
+    stub_formula_loader(bar, call_original: true)
+    messages = Messages.new
+    allow(Homebrew).to receive(:messages).and_return(messages)
+    # Each pour takes 100 seconds, and nothing else takes any time.
+    now = Time.now
+    allow(Time).to receive(:now) { now }
+    allow_any_instance_of(FormulaInstaller).to receive(:pour) { now += 100 }
+    allow_any_instance_of(FormulaInstaller)
+      .to receive_messages(pour_bottle?: true, lock: nil, prelude: nil, finish: nil)
+    allow_any_instance_of(FormulaInstaller).to receive(:compute_dependencies) do |installer|
+      if installer.formula == foo
+        [Dependency.new(bar.full_name)]
+      else
+        []
+      end
+    end
+    lines = []
+    allow($stdout).to receive(:puts) { |*printed| lines.concat(printed.map { ["#{it}\n", nil] }) }
+    FormulaInstaller.new(foo).install
+    messages.display_install_times
+    expect(Timed::Runner.parse(lines).transform_values { |build| build["install_seconds"] })
+      .to eq("foo" => 100.0, "bar" => 100.0)
   end
 
   describe "`Dependency.expand`" do
@@ -1293,14 +1409,38 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "the lines `Timed::Runner.parse` names formulae by" do
+    # With a bottle, a resource and a patch, so every download brew names.
     let(:foo) do
       formula("foo", tap: Tap.fetch("user", "tap")) do
         T.bind(self, T.class_of(Formula))
         url "https://brew.sh/foo-1.0.tgz"
+        revision 1
+        TimedBottleHelper.bottle(self)
+        resource "res" do
+          T.bind(self, Resource)
+          url "https://brew.sh/res-1.0.tgz"
+          sha256 "b" * 64
+        end
+        patch do
+          T.bind(self, Resource::Patch)
+          url "https://brew.sh/fix.patch"
+          sha256 "c" * 64
+        end
       end
     end
 
     def parsed(lines) = Timed::Runner.parse(lines.map { |line| ["#{line}\n", nil] }).keys
+
+    # Fails a build step of `foo`, which prints `make: *** Error 1`, as
+    # `Formula#system` does, and returns the error.
+    def failed_build(foo)
+      # Brew writes the host's configuration into the log after it prints the
+      # log's end; that would ask for curl's version.
+      allow(SystemConfig).to receive(:dump_verbose_config)
+      foo.system "/bin/sh", "-c", "echo 'make: *** Error 1'; exit 1"
+    rescue BuildError => e
+      e
+    end
 
     it "include the heading a tap formula's install starts with" do
       lines = []
@@ -1309,35 +1449,69 @@ RSpec.describe "brew internals", type: :system do
       expect(parsed(lines)).to eq(%w[foo])
     end
 
+    # `Timed::Runner::POURING` in `Parser#feed_line`, and so `Runner.run`'s
+    # `begun`.
     it "include the bottle a formula pours, which is all an install with no dependencies to install names " \
-       "before its summary", :aggregate_failures do
-      expect(brew_source("formula_installer.rb")).to include(
-        "oh1 \"Installing \#{Formatter.identifier(formula.full_name)} \#{options}\".strip if show_header?",
-        "@show_header = true unless deps.empty?",
-        "ohai \"Pouring \#{downloadable_object.downloader.basename}\"",
-      )
-      bottle = Bottle::Filename.new("foo", PkgVersion.parse("1.0_1"), Utils::Bottles.tag, 1)
-      expect(parsed(["==> Pouring #{bottle}"])).to eq(%w[foo])
+       "before its summary" do
+      installer = FormulaInstaller.new(foo)
+      allow(installer).to receive_messages(compute_dependencies: [], lock: nil)
+      # Stops the install where it extracts the bottle.
+      allow_any_instance_of(Bottle).to receive(:stage) { throw :staging }
+      lines = []
+      allow($stdout).to receive(:puts) { |*printed| lines.concat(printed) }
+      catch(:staging) { installer.install }
+      expect(parsed(lines)).to eq(%w[foo])
     end
 
+    # `Timed::Runner`'s `PROBLEM`, `LOG_START`, `Parser#log_file_lines` and
+    # `BUILD_FAILED` (`Runner.stopped_at_build?`).
     it "include the log a failed build prints the end of, in a directory named after the formula, before brew " \
-       "appends to its file", :aggregate_failures do
-      expect(brew_source("formula.rb")).to include(
-        "log_filename = format(\"\#{logs}/\#{active_log_prefix}%02<exec_count>d.%<cmd_base>s.log\",",
-        "puts \"Last \#{log_lines} lines from \#{log_filename}:\"",
-        "Kernel.system \"/usr/bin/tail\", \"-n\", log_lines.to_s, log_filename\n        end\n        log.puts\n",
-      )
-      expect(parsed(["Last 15 lines from #{foo.logs}/01.make.log:", "make: *** Error 1"])).to eq(%w[foo])
+       "appends to its file" do
+      header = "Last #{Homebrew::EnvConfig.fail_log_lines} lines from #{foo.logs}/01.sh.log:"
+      # The end of the log is printed by another process.
+      tail = satisfy("be read as a problem of foo's from the log's header to its last line") do |text|
+        problems = Timed::Runner.parse(text.lines.map { |line| [line, nil] }).transform_values do |build|
+          build["problems"]&.map { |problem| problem.lines(chomp: true).values_at(0, -1) }
+        end
+        problems == { "foo" => [[header, "make: *** Error 1"]] }
+      end
+      expect { failed_build(foo) }.to output(tail).to_stdout_from_any_process
     end
 
-    it "name a failed resource download after its formula, and a patch or API source download only by file, " \
-       "which `Timed::Runner` relies on to tell a formula brew left out from one it never got to" do
-      resource = brew_source("resource.rb")
-      expect([resource.include?("owner_name ? \"\#{owner_name}--\#{escaped_name}\" : escaped_name"),
-              resource.scan(/def download_queue_type = "([^"]+)"/).flatten,
-              brew_source("api/source_download.rb").include?('def download_queue_type = "API Source"'),
-              brew_source("downloadable.rb").include?("\"\#{download_queue_type} \#{download_queue_name}\"")])
-        .to eq([true, ["Resource", "Formula", "Bottle Manifest", "Patch"], true, true])
+    # `Timed::Runner`'s `FETCH_FAILED` and `RESOURCE_FAILED` in
+    # `Parser#feed_line`, and `UNNAMED_FETCH_FAILED` in `Runner.run`.
+    it "name a failed download of a formula, its bottle or a resource after the formula, and of a patch or API " \
+       "source only by file, which `Timed::Runner` relies on to tell a formula brew left out from one it never " \
+       "got to" do
+      # Brew downloads in parallel unless told not to, and only then prints
+      # each failed download.
+      ENV["HOMEBREW_DOWNLOAD_CONCURRENCY"] = "2"
+      # Brew then names each download after its URL, as when it can't reach
+      # the server.
+      allow_any_instance_of(CurlDownloadStrategy).to receive(:curl_headers)
+        .and_raise(ErrorDuringExecution.new(%w[curl], status: 6))
+      allow_any_instance_of(Homebrew::RetryableDownload).to receive(:fetch).and_raise(RuntimeError, "offline")
+      api_source = Homebrew::API::SourceDownload.new("https://brew.sh/foo.rb", Checksum.new("d" * 64), formula: foo)
+      downloads = { "source" => foo.resource, "bottle" => foo.bottle, "resource" => foo.resources.first,
+                    "patch" => foo.patchlist.first&.resource, "API source" => api_source }
+      # By formula, the version read, if any, and how many failures are by
+      # file only.
+      read = downloads.transform_values do |download|
+        queue = Homebrew::DownloadQueue.new
+        queue.enqueue(download, stage: false) if download
+        printed = StringIO.new
+        allow($stderr).to receive(:puts) { |*lines| printed.puts(*lines) }
+        begin
+          queue.fetch
+        ensure
+          queue.shutdown
+        end
+        lines = printed.string.lines
+        [Timed::Runner.parse(lines.map { |line| [line, nil] }).transform_values { |build| build["version"] },
+         lines.grep(Timed::Runner::UNNAMED_FETCH_FAILED).length]
+      end
+      expect(read).to eq("source" => [{ "foo" => nil }, 0], "bottle" => [{ "foo" => "1.0_1" }, 0],
+                         "resource" => [{ "foo" => nil }, 0], "patch" => [{}, 1], "API source" => [{}, 1])
     end
 
     it "include none from dependents brew rebuilds or upgrades after its heading, or a failed post-install",
@@ -1387,12 +1561,19 @@ RSpec.describe "brew internals", type: :system do
         .to output(a_string_starting_with("#{Timed::Runner::POST_INSTALL_FAILED}\n")).to_stderr
     end
 
-    it "include the error ending a verbose build's failure, which prints no log tail", :aggregate_failures do
-      expect([brew_source("formula.rb").include?("if !verbose? || verbose_using_dots"),
-              brew_source("exceptions.rb").include?(
-                "onoe \"\#{formula.full_name} \#{formula.version} did not build\"",
-              )]).to eq([true, true])
-      expect(parsed(["Error: #{foo.full_name} #{foo.version} did not build"])).to eq(%w[foo])
+    # `Timed::Runner`'s `PROBLEM` and `BUILD_FAILED`
+    # (`Runner.stopped_at_build?`).
+    it "include the error ending a verbose build's failure" do
+      allow(foo).to receive(:verbose?).and_return(true)
+      # Brew's own checks then note no support tier for the run's exit, nor ask
+      # GitHub for issues.
+      allow(Homebrew::Diagnostic).to receive(:support_tiers).and_return([])
+      ENV["HOMEBREW_NO_BUILD_ERROR_ISSUES"] = "1"
+      # What it prints to both streams in one, as a batch reads them.
+      output = StringIO.new
+      [$stdout, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
+      failed_build(foo)&.dump(verbose: true)
+      expect(parsed(output.string.lines(chomp: true))).to eq(%w[foo])
     end
   end
 
@@ -1456,7 +1637,9 @@ RSpec.describe "brew internals", type: :system do
       [error, $stderr].each { |stream| allow(stream).to receive(:puts) { |*lines| output.puts(*lines) } }
       error.dump
       parsed = Timed::Runner.parse([*log, *output.string.lines].map { |line| ["#{line.chomp}\n", nil] })
-      ["#{name}#{", with its log file" if with_file}#{", annotated" if annotated}", parsed.dig("foo", "problems")]
+      file_note = ", with its log file" if with_file
+      annotation_note = ", annotated" if annotated
+      ["#{name}#{file_note}#{annotation_note}", parsed.dig("foo", "problems")]
     end
     expect(problems).to eq(problems.to_h do |key, _|
       [key, [logs.fetch(key.include?(", with its log file")).join("\n")]]

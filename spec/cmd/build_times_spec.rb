@@ -150,8 +150,10 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
                                   "date" => "2026-09-20" } }
         database.write(JSON.generate(JSON.parse(database.read).merge("estimates" => estimates)))
         header = capture_stdout { described_class.new(%w[stats llvm]).run }.lines.fetch(-2)
+        estimate = heading("estimate", 9, right: true)
+        actual = heading("actual", 9, right: true)
         expect(header).to eq("#{heading("formula", 28)} #{heading("version", 12)} " \
-                             "#{heading("estimate", 9, right: true)} #{heading("actual", 9, right: true)}  " \
+                             "#{estimate} #{actual}  " \
                              "#{heading("model", 5)} #{heading("date", 4)}\n")
       end
 
@@ -324,7 +326,8 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
 
       it "prints a JSON array with a row per row of the table, in `JSON.pretty_generate` form" do
         output = capture_stdout { described_class.new(%w[stats --json wget]).run }
-        expect(output).to eq("#{JSON.pretty_generate(JSON.parse(output))}\n")
+        pretty = JSON.pretty_generate(JSON.parse(output))
+        expect(output).to eq("#{pretty}\n")
       end
 
       it "has the keys, in seconds, and every build of the kind, with the failed build" do
@@ -414,9 +417,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
 
     it "handles a missing database" do
       database.delete
+      header = table.lines.first.sub(/last +trend/, "last  trend")
       expect { described_class.new(%w[stats]).run }
-        .to output("#{table.lines.first.sub(/last +trend/, "last  trend")}" \
-                   "fallback for unknown formulae (median of per-package means): 10m00s\n")
+        .to output("#{header}fallback for unknown formulae (median of per-package means): 10m00s\n")
         .to_stdout
     end
   end
@@ -429,7 +432,8 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     def histogram(*args) = capture_stdout { described_class.new(["histogram", *args]).run }
 
     def plot(title, values, width: 60, smooth: false, linear: false)
-      "#{["==> #{title}", *Timed::Plot.histogram(values, width:, smooth:, linear:)].join("\n")}\n"
+      lines = ["==> #{title}", *Timed::Plot.histogram(values, width:, smooth:, linear:)]
+      "#{lines.join("\n")}\n"
     end
 
     it "plots source builds or pours, by the mean of each formula or every build, under a title" do
@@ -585,8 +589,9 @@ RSpec.describe Homebrew::Cmd::BuildTimes do
     def timeline(number)
       run = Timed::Runs.all(Timed::BuildLog.load(database)).fetch(number - 1)
       sections = Timed::Runs.timeline(run, number, width: 80, paint: ->(text, _style) { text })
-      "#{sections.map { |heading, lines| ["==> #{heading}", *lines].join("\n") }.join("\n")}\n" \
-        "#{Timed::Runs.total(run).join("\n")}\n"
+      body = sections.map { |heading, lines| ["==> #{heading}", *lines].join("\n") }.join("\n")
+      total = Timed::Runs.total(run).join("\n")
+      "#{body}\n#{total}\n"
     end
 
     it "lists the runs, newest first" do
