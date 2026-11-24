@@ -10,6 +10,8 @@ require "api/source_download"
 require "ask"
 require "caveats"
 require "cask/cask"
+require "cask/reinstall"
+require "cask/upgrade"
 require "cmd/install"
 require "cmd/reinstall"
 require "cmd/upgrade"
@@ -22,6 +24,7 @@ require_relative "../cmd/install-timed"
 require_relative "../lib/timed/command"
 require_relative "../lib/timed/runner"
 require_relative "support/bottles"
+require_relative "support/casks"
 
 # Canaries: each pins a brew internal the `-timed` commands rely on, so a brew
 # change fails here instead of during a real upgrade. When one fails, first
@@ -30,6 +33,11 @@ require_relative "support/bottles"
 # and adds little code or verbosity; pin the new text only otherwise.
 RSpec.describe "brew internals", type: :system do
   include TimedBottleHelper
+  include TimedCaskHelper
+
+  # So the casks `TimedCaskHelper#stub_cask` puts on disk load by token, and
+  # anything else as brew loads it.
+  before { allow(Cask::CaskLoader).to receive(:loader_for).and_call_original }
 
   def brew_source(path) = (HOMEBREW_LIBRARY_PATH/path).read
 
@@ -84,6 +92,38 @@ RSpec.describe "brew internals", type: :system do
     nil
   rescue BuildFlagsError => e
     e.message
+  end
+
+  # Brew's cask installers, with no caveats to record, nothing to fetch and no
+  # Gatekeeper.
+  def stub_cask_fetch
+    allow_any_instance_of(Cask::Installer).to receive_messages(record_caveats: nil, fetch: nil)
+    allow(Cask::Quarantine).to receive(:available?).and_return(false)
+  end
+
+  # `brew upgrade --cask` of the installed, outdated `cask`, past its download.
+  def upgrade_cask(cask)
+    Cask::Upgrade.upgrade_casks!(cask, args: Homebrew::CLI::Args.new, skip_prefetch: true, quiet: true,
+                                       download_queue: instance_double(Homebrew::DownloadQueue))
+  end
+
+  # `brew reinstall --cask` of `cask`, with `--zap` if `zap`, past its download.
+  def reinstall_cask(cask, zap: false)
+    Cask::Reinstall.reinstall_casks(cask, zap:, skip_prefetch: true,
+                                          download_queue: instance_double(Homebrew::DownloadQueue))
+  end
+
+  # The receipt of the installed cask `token`, which recorded
+  # `uninstall_artifacts`, and the tap `tap` (none when nil), read afresh.
+  def write_cask_receipt(token, uninstall_artifacts, tap: nil)
+    (HOMEBREW_PREFIX/"Caskroom/#{token}/.metadata/INSTALL_RECEIPT.json")
+      .write(JSON.generate("uninstall_artifacts" => uninstall_artifacts, "source" => { "tap" => tap }))
+    Cask::Tab.clear_cache
+  end
+
+  # The DSL key and arguments of each of `artifacts`, in a stable order.
+  def stanza_args(artifacts)
+    artifacts.map { |artifact| [artifact.class.dsl_key, artifact.to_args] }.sort_by(&:inspect)
   end
 
   describe "tap commands" do
@@ -288,21 +328,96 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`uninstall login_item` on upgrade and reinstall" do
-    it "returns early because brew passes a `successor`" do
-      body = brew_source("cask/artifact/abstract_uninstall.rb")[/^      def uninstall_login_item\(.*?^      end$/m]
-      expect(body).to match(/\A[^\n]*\n\s+return if successor\n/)
-      expect(brew_source("cask/upgrade.rb")).to include("old_cask_installer.start_upgrade(successor: new_cask")
-      expect(brew_source("cask/installer.rb")).to include("cask_installer.uninstall(successor: @cask)")
+    # `Timed::Casks.reasons`, which on upgrade and reinstall judges the
+    # uninstall of the installed cask (`Timed::Command.installed_cask`) by
+    # its `flight_blocks(uninstall: true)`, `uninstall_directives`
+    # (`login_item: zap`, and the `zap` stanzas only with `zap`) and
+    # `uninstall_steps`: otherwise the plan misses an uninstall brew runs,
+    # `reinstall --zap` raises a dialog the plan doesn't warn of, or a cask
+    # is held back for nothing.
+    it "uninstalls the installed cask on upgrade and reinstall, but runs its `login_item` only on " \
+       "`reinstall --zap`, from its `uninstall` and `zap` stanzas" do
+      stub_cask_fetch
+      allow_any_instance_of(Cask::Installer).to receive(:stage) { throw :staged, :staged }
+      # The stanzas dispatched, by the version of their cask: brew dispatches
+      # them whether or not it passes a `successor`.
+      dispatched = []
+      allow(Cask::Artifact::AbstractUninstall).to receive(:dispatch_directives)
+        .and_wrap_original do |original, stanzas, **options|
+          dispatched.concat(stanzas.map { |stanza| [stanza.class.dsl_key, stanza.cask.version.to_s] })
+          original.call(stanzas, **options)
+        end
+      removed = []
+      allow_any_instance_of(Cask::Artifact::AbstractUninstall).to receive(:sleep)
+      allow_any_instance_of(Cask::Artifact::AbstractUninstall)
+        .to receive(:system_command) do |stanza, _executable, args:|
+          removed << [stanza.class.dsl_key, args.last[/"([^"]*)"\z/, 1]]
+          instance_double(SystemCommand::Result, success?: true)
+        end
+      modes = { "upgrade"         => ->(cask) { upgrade_cask(cask) },
+                "reinstall"       => ->(cask) { reinstall_cask(cask) },
+                "reinstall --zap" => ->(cask) { reinstall_cask(cask, zap: true) } }
+      login_items = ->(name) { "uninstall login_item: \"#{name}\"\nzap login_item: \"#{name}Zap\"" }
+      actual = modes.to_h do |mode, run|
+        dispatched.clear
+        removed.clear
+        cask = stub_cask(mode.delete("^a-z"), stanzas:           login_items.call("New"),
+                                              installed_stanzas: login_items.call("Old"))
+        # Brew reports a failure and carries on, so each mode must get as far
+        # as staging the new cask.
+        staged = catch(:staged) do
+          run.call(cask)
+          :not_staged
+        end
+        [mode, [staged, dispatched.uniq, removed.dup]]
+      end
+      uninstalled = [[:uninstall, "1.0"]]
+      expect(actual).to eq({ "upgrade"         => [:staged, uninstalled, []],
+                             "reinstall"       => [:staged, uninstalled, []],
+                             "reinstall --zap" => [:staged, [*uninstalled, [:zap, "1.0"]],
+                                                   [[:uninstall, "Old"], [:zap, "OldZap"]]] })
     end
   end
 
   describe "`Cask::Utils` around missing paths" do
-    it "makes a symlink's directory without sudo, and has nothing to remove for a missing path" do
-      expect(brew_source("install_steps.rb"))
-        .to match(/def create_symlink\(source, target, step\)\n\s+target\.dirname\.mkpath\n\s+if step\["sudo"\]/)
-      remove_body = brew_source("cask/utils.rb")[/^    def self\.gain_permissions_remove\(.*?^    end$/m]
-      expect(remove_body).to match(/# Nothing to remove\.\n\s+return\n\s+end\n/)
-      expect(brew_source("cask/utils.rb")).to include("dir = path.ascend.find(&:directory?)")
+    # `Timed::Casks.if_needed_reasons`, which gives no reason for a missing
+    # directory or a missing removed path, and `.unwritable_directories`,
+    # which judges the nearest existing ancestor: otherwise the plan misses a
+    # sudo prompt, or holds back a cask that never needs sudo.
+    it "makes a symlink's missing directory and the parents of a path without sudo, unless the nearest one " \
+       "that exists isn't writable, and has nothing to remove for a missing path" do
+      calls = []
+      allow(SystemCommand).to receive(:run) do |executable, sudo: false, **|
+        calls << [executable, sudo]
+        instance_double(SystemCommand::Result, success?: true, stdout: "")
+      end
+      dir = mktmpdir
+      (dir/"ro").mkpath
+      (dir/"ro").chmod(0555)
+      at = ->(path) { { "path" => (dir/path).to_s } }
+      link = { "type" => "symlink", "source" => at.call("src"), "sudo" => "if_needed" }
+      runner = Homebrew::InstallSteps::Runner.new(context: Object.new)
+      cases = {
+        "link into a missing directory" => -> { runner.run([link.merge("target" => at.call("new/link"))]) },
+        "link into an unwritable one"   => -> { runner.run([link.merge("target" => at.call("ro/link"))]) },
+        "remove a missing path"         => lambda {
+          runner.run([{ "type" => "remove", "paths" => [at.call("ro/gone")], "sudo" => "if_needed" }])
+        },
+        "make under a writable one"     => -> { Cask::Utils.gain_permissions_mkpath(dir/"a/b") },
+        "make under an unwritable one"  => -> { Cask::Utils.gain_permissions_mkpath(dir/"ro/a/b") },
+      }
+      actual = cases.transform_values do |run|
+        calls.clear
+        run.call
+        calls.dup
+      end
+      expect(actual).to eq({ "link into a missing directory" => [],
+                             "link into an unwritable one"   => [["/bin/ln", true]],
+                             "remove a missing path"         => [],
+                             "make under a writable one"     => [],
+                             "make under an unwritable one"  => [["mkdir", nil]] })
+    ensure
+      (dir/"ro").chmod(0755) if dir
     end
   end
 
@@ -336,39 +451,20 @@ RSpec.describe "brew internals", type: :system do
       expect(zap_options).to eq({ "reinstall" => true, "upgrade" => false })
     end
 
-    it "is passed on only by `reinstall`, which calls `Installer#zap` only from `uninstall_existing_cask`" do
-      passed_on = %w[cmd/install.rb cmd/upgrade.rb cmd/reinstall.rb].to_h do |path|
-        [path, brew_source(path).scan(/zap:\s*args\.zap\?/).length]
-      end
-      zap_calls = %w[cask/installer.rb cask/upgrade.rb cask/reinstall.rb].flat_map do |path|
-        brew_source(path).scan(/\.zap\b/).map { |call| [path, call] }
-      end
-      expect([passed_on, zap_calls.map(&:first)])
-        .to eq([{ "cmd/install.rb" => 0, "cmd/upgrade.rb" => 0, "cmd/reinstall.rb" => 2 }, ["cask/installer.rb"]])
-    end
-
-    it "replaces `uninstall(successor:)` with `Installer#zap` for a reinstall of the installed cask" do
-      body = brew_source("cask/installer.rb")[/^    def uninstall_existing_cask\n.*?^    end$/m]
-      expect(body).to include("zap? ? cask_installer.zap : cask_installer.uninstall(successor: @cask)")
-      expect(body).to match(/Installer\.new\(@cask, .*reinstall: true\)/)
-    end
-
-    it "uninstalls the installed cask without a successor, with its `zap` stanzas" do
-      body = brew_source("cask/installer.rb")[/^    def zap\(dry_run: false\)\n.*?^    end$/m]
-      expect(body.lines.map(&:strip).grep(/uninstall_artifacts|zap_phase|load_installed_caskfile|zap_stanzas =/))
-        .to eq(["load_installed_caskfile!", "zap_stanzas = @cask.artifacts.grep(Artifact::Zap)",
-                "uninstall_artifacts(clear: true, zap_stanzas:)"])
-    end
-
-    it "dispatches the `zap` stanzas after the `uninstall` stanza, with the installer's `successor` and " \
-       "`reinstall`, then again for the deferred directives" do
-      body = brew_source("cask/installer.rb")[/^    def uninstall_artifacts\(.*?^    end$/m]
-      calls = body.scan(/AbstractUninstall\.dispatch_directives\((.*?)\)$/m).flatten
-                  .map { |args| args.gsub(/\s+/, " ") }
-      expect([body.include?("directive_artifacts = [*artifacts.grep(Artifact::Uninstall), *zap_stanzas]"), calls])
-        .to eq([true, ["directive_artifacts, command: @command, force: force?, successor:, upgrade: upgrade?, " \
-                       "reinstall: reinstall?, quit:",
-                       "directive_artifacts, command: @command, deferred: true, force: force?, successor:"]])
+    # `ReinstallTimed#reinstall`, which passes `zap: args.zap?` to
+    # `Timed::Command.cask_plan`, and `InstallTimed#run`, which passes no
+    # `zap` though `brew install` takes `--zap`: otherwise the plan judges
+    # the uninstall on stanzas brew doesn't run, and misses those it does.
+    it "is passed to the cask installer by `reinstall`, but not by `install`, which also takes it" do
+      cask = stub_cask("foo")
+      allow(Cask::Installer).to receive(:new) { |_cask, **options| throw :installer, options.fetch(:zap, false) }
+      allow(Homebrew::Install).to receive(:ask_casks)
+      # `Reinstall` is brew's command, not a typo of `ReinstallTimed`.
+      reinstall = Homebrew::Cmd::Reinstall.new(%w[--cask --zap foo]) # rubocop:disable Lint/NameTypo
+      allow(reinstall.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([cask])
+      commands = { "reinstall" => reinstall, "install" => install_command(%w[--cask --zap foo], [cask]) }
+      expect(commands.transform_values { |command| catch(:installer) { command.run } })
+        .to eq({ "reinstall" => true, "install" => false })
     end
 
     it "dispatches every directive of the `uninstall` and `zap` stanzas over both passes, but `signal` as a " \
@@ -384,11 +480,6 @@ RSpec.describe "brew internals", type: :system do
       every = [:uninstall, :zap].product(Cask::Artifact::AbstractUninstall::ORDERED_DIRECTIVES)
       expect(actual).to eq({ "neither" => (every - [[:uninstall, :signal], [:zap, :signal]]).sort,
                              "zap's"   => (every - [[:uninstall, :signal]]).sort })
-    end
-
-    it "runs `uninstall_login_item` unless brew passes a `successor`" do
-      body = brew_source("cask/artifact/abstract_uninstall.rb")[/^      def uninstall_login_item\(.*?^      end$/m]
-      expect(body.scan(/\breturn\b.*/)).to eq(["return if successor"])
     end
   end
 
@@ -486,125 +577,250 @@ RSpec.describe "brew internals", type: :system do
       expect(actual).to eq(expected)
     end
 
-    it "has a `post_uninstall_phase` only in `uninstall`, which runs its deferred directives" do
-      classes = [*Cask::DSL::ORDINARY_ARTIFACT_CLASSES, *Cask::DSL::ARTIFACT_BLOCK_CLASSES,
-                 *Cask::DSL::INSTALL_STEP_ARTIFACT_CLASSES]
-      body = brew_source("cask/artifact/uninstall.rb")[/^      def post_uninstall_phase\(.*?^      end$/m]
-      expect([classes.select { |klass| klass.method_defined?(:post_uninstall_phase) }, body.lines.map(&:strip)[1]])
-        .to eq([[Cask::Artifact::Uninstall],
-                "AbstractUninstall.dispatch_directives([self], command:, deferred: true, force:, successor:)"])
-    end
-
-    it "does so from `uninstall` (reinstall) and `start_upgrade`" do
-      source = brew_source("cask/installer.rb")
-      expect([source[/^    def uninstall\(.*?^    end$/m], source[/^    def start_upgrade\(.*?^    end$/m]])
-        .to match([/uninstall_artifacts\(clear: true, successor:\)/, /uninstall_artifacts\(successor:, quit:\)/])
-    end
-
+    # `Timed::Casks.flight_blocks`, which counts a block's `uninstall_` keys
+    # on uninstall and the others on install: otherwise the plan misses a
+    # block that may call sudo, or holds a cask back for one that won't run.
     it "runs a flight block's `dsl_key` on install and its `uninstall_dsl_key` on uninstall" do
-      source = brew_source("cask/artifact/abstract_flight_block.rb")
-      expect([source[/^      def install_phase\(.*?^      end$/m][/abstract_phase\(.*\)/],
-              source[/^      def uninstall_phase\(.*?^      end$/m][/abstract_phase\(.*\)/]])
-        .to eq(["abstract_phase(self.class.dsl_key)", "abstract_phase(self.class.uninstall_dsl_key)"])
+      cask = Cask::Cask.new("timed-canary")
+      ran = {}
+      phase = T.let(nil, T.nilable(Symbol))
+      Cask::DSL::ARTIFACT_BLOCK_CLASSES.each do |klass|
+        [klass.dsl_key, klass.uninstall_dsl_key].each do |key|
+          artifact = klass.new(cask, key => proc { (ran[key] ||= []) << phase })
+          phase = :install
+          artifact.install_phase
+          phase = :uninstall
+          artifact.uninstall_phase
+        end
+      end
+      expect(ran).to eq({ preflight: [:install], uninstall_preflight: [:uninstall], postflight: [:install],
+                          uninstall_postflight: [:uninstall] })
     end
 
-    it "removes only `symlink` steps with `uninstall: true` from `preflight_steps` and `postflight_steps`" do
-      body = brew_source("install_steps.rb")[/^      def run_uninstall_step\(step\)\n.*?^      end$/m]
-      expect(body).to match(
-        /\A[^\n]*\n\s+return if step\.fetch\("type"\) != "symlink"\n\s+return if step\["uninstall"\] != true\n/,
-      )
-      expect(body).to include("return unless target.symlink?",
-                              'step["sudo"] == true || (step["sudo"] == "if_needed" && !target.dirname.writable?)')
+    # `Timed::Casks.uninstall_steps` and `.removed_links`: otherwise a link
+    # brew removes with sudo prompts mid-run, or the plan holds back a cask
+    # that never needs sudo.
+    it "removes only the `symlink` links of `preflight_steps` and `postflight_steps` marked `uninstall: true` " \
+       "that point to their source, with sudo only if `sudo` is set and their directory isn't writable" do
+      # In-process: brew runs the steps in a sandboxed child on macOS.
+      allow(Sandbox).to receive(:use_for?).and_return(false)
+      calls = []
+      allow(SystemCommand).to receive(:run) do |executable, args: [], sudo: false, **|
+        calls << [Pathname(args.last.to_s).basename.to_s, executable, sudo]
+        instance_double(SystemCommand::Result, success?: true, stdout: "")
+      end
+      cask = Cask::Cask.new("timed-canary")
+      dirs = []
+      actual = [Cask::Artifact::PreflightSteps, Cask::Artifact::PostflightSteps].to_h do |klass|
+        dir = mktmpdir
+        dirs << (dir/"ro")
+        cases = {
+          "remove step"           => ["w", { "type" => "remove", "sudo" => true }],
+          "unmarked"              => ["w", { "sudo" => true }],
+          "no sudo"               => ["w", { "uninstall" => true }],
+          "if_needed"             => ["w", { "uninstall" => true, "sudo" => "if_needed" }],
+          "sudo"                  => ["w", { "uninstall" => true, "sudo" => true }],
+          "unwritable"            => ["ro", { "uninstall" => true }],
+          "if_needed, unwritable" => ["ro", { "uninstall" => true, "sudo" => "if_needed" }],
+          "sudo, unwritable"      => ["ro", { "uninstall" => true, "sudo" => true }],
+          "elsewhere, unwritable" => ["ro", { "uninstall" => true, "sudo" => true, "source" => "other" }],
+        }
+        links = cases.to_h { |name, (subdir, _)| [name, dir/subdir/name.delete("^a-z")] }
+        steps = cases.map do |name, (_, options)|
+          link = links.fetch(name)
+          link.dirname.mkpath
+          link.make_symlink(dir/"source")
+          target = { "path" => link.to_s }
+          if options["type"] == "remove"
+            options.merge("paths" => [target])
+          else
+            { "type" => "symlink", "target" => target, **options,
+              "source" => { "path" => (dir/options.fetch("source", "source")).to_s } }
+          end
+        end
+        (dir/"ro").chmod(0555)
+        calls.clear
+        klass.new(cask, steps).uninstall_phase
+        [klass.dsl_key, links.to_h do |name, link|
+          sudo = calls.select { |call| call.first == link.basename.to_s }.map { |call| call.drop(1) }
+          [name, sudo.presence || (link.symlink? ? :kept : :removed)]
+        end]
+      end
+      expected = { "remove step" => :kept, "unmarked" => :kept, "no sudo" => :removed, "if_needed" => :removed,
+                   "sudo" => :removed, "unwritable" => :kept, "if_needed, unwritable" => [["/bin/rm", nil]],
+                   "sudo, unwritable" => [["/bin/rm", nil]], "elsewhere, unwritable" => :kept }
+      expect(actual).to eq({ preflight_steps: expected, postflight_steps: expected })
+    ensure
+      dirs&.each { |dir| dir.chmod(0755) }
     end
 
-    it "loads the installed caskfile to reinstall it" do
-      body = brew_source("cask/installer.rb")[/^    def load_installed_caskfile!.*?^    end$/m]
-      expect(body).to include("CaskLoader.load_from_installed_caskfile(installed_caskfile)")
+    # `Timed::Command.installed_cask`, whose trust guard picks the cask a
+    # reinstall uninstalls, and `.recorded_cask`: otherwise the plan judges
+    # an uninstall brew doesn't run, or misses one it does.
+    it "uninstalls, on reinstall, the installed caskfile's cask, but for a cask that isn't trusted, by the " \
+       "receipt's tap or else its own, with tap trust on, the new cask with the artifacts its install recorded, " \
+       "as `Timed::Command.installed_cask` does" do
+      installed = "app \"Old.app\"\nuninstall quit: \"com.old\"\nzap trash: \"~/old\""
+      cask = stub_cask("foo", stanzas: 'zap trash: "~/new"', installed_stanzas: installed)
+      allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
+      uninstall_artifacts = [{ "app" => ["Old.app"] }, { "uninstall" => [{ "quit" => "com.old" }] }]
+      # `[tap trust on, the receipt's tap, the casks trusted]`
+      runs = { "trusted"               => [true, nil, ["user/tap/foo"]],
+               "untrusted"             => [true, nil, []],
+               "trust off"             => [false, nil, []],
+               "receipt's tap trusted" => [true, "other/tap", ["other/tap/foo"]],
+               "only own tap trusted"  => [true, "other/tap", ["user/tap/foo"]] }
+      actual = runs.to_h do |run, (trust_on, receipt_tap, trusted)|
+        write_cask_receipt("foo", uninstall_artifacts, tap: receipt_tap)
+        allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(trust_on)
+        allow(Homebrew::Trust).to receive(:trusted?) { |type, name| type == :cask && trusted.include?(name) }
+        installer = Cask::Installer.new(cask, reinstall: true)
+        installer.load_installed_caskfile!
+        # What `Installer#uninstall` and `#zap` act on.
+        brew = [installer.cask.version.to_s, stanza_args(installer.artifacts.grep_v(Cask::Artifact::Zap) +
+                                                         installer.cask.artifacts.grep(Cask::Artifact::Zap))]
+        loaded = Timed::Command.installed_cask(cask, reinstall: true)
+        tap = [loaded&.version.to_s, stanza_args(loaded&.artifacts || [])]
+        # The version, where both act on the same cask.
+        same = brew == tap
+        [run, same ? brew.first : [brew, tap]]
+      end
+      expect(actual).to eq({ "trusted" => "1.0", "untrusted" => "2.0", "trust off" => "1.0",
+                             "receipt's tap trusted" => "1.0", "only own tap trusted" => "2.0" })
     end
 
-    it "doesn't load a Ruby caskfile to reinstall a cask that isn't trusted, with tap trust on, as " \
-       "`Timed::Command.installed_cask` follows, keeping the new cask (and its `zap`)" do
-      body = brew_source("cask/installer.rb")[/^    def load_installed_caskfile!.*?^    end$/m].to_s
-      guard = ["tab = CaskLoader.load_installed_tab(@cask)", "tap = tab.tap", "tap ||= @cask.tap",
-               'if installed_caskfile.extname == ".rb" &&', "Homebrew::EnvConfig.require_tap_trust? &&", "tap &&",
-               "!Homebrew::Trust.trusted?(:cask, \"\#{tap.name}/\#{@cask.token}\")"]
-      lines = body.lines.map(&:strip)
-      untrusted = body[/trusted\?.*?^\s+return$/m]
-      zap = brew_source("cask/installer.rb")[/^    def zap\(dry_run: false\)\n.*?^    end$/m].to_s
-      expect([guard.map { |line| lines.index(line) }.then { |at| at.all? && at == at.sort },
-              untrusted&.exclude?("@cask ="), zap.include?("@cask.artifacts.grep(Artifact::Zap)")])
-        .to eq([true, true, true])
-    end
-
-    it "uninstalls instead the artifacts the untrusted cask recorded, replayed as `Timed::Command.recorded_cask` " \
-       "replays them" do
-      source = brew_source("cask/installer.rb")
-      untrusted = source[/^    def load_installed_caskfile!.*?^    end$/m].to_s[/trusted\?.*?^\s+return$/m].to_s
-      replay = ["dsl = DSL.new(@cask)",
-                "default_uninstall_artifact_keys = DSL::ACTIVATABLE_ARTIFACT_CLASSES.filter_map do |klass|",
-                "next if [Artifact::Uninstall, Artifact::Zap].include?(klass)",
-                "next if !klass.method_defined?(:uninstall_phase) && !klass.method_defined?(:post_uninstall_phase)",
-                "Array(tab.uninstall_artifacts).each do |artifact_entry|",
-                "next unless default_uninstall_artifact_keys.include?(dsl_key)",
-                "args = Array(raw_args)", "if args.last.is_a?(Hash)", "*args[...-1],",
-                "**T.cast(args.last, T::Hash[T.any(Symbol, String), T.anything]).transform_keys(&:to_sym),",
-                "dsl.public_send(dsl_key, *args)",
-                "@default_uninstall_artifacts ||= dsl.artifacts"]
-      expect([replay.map { |line| untrusted.lines.map(&:strip).include?(line) },
-              source.match?(/def artifacts\n\s+@default_uninstall_artifacts \|\| @cask\.artifacts\n/)])
-        .to eq([replay.map { true }, true])
+    # `Timed::Command.recorded_cask`, which replays the receipt as brew does:
+    # otherwise the plan judges an uninstall brew doesn't run, or misses one
+    # it does.
+    it "replays, for a cask that isn't trusted, the receipt's entries for the artifacts with an uninstall phase, " \
+       "other than `uninstall` and `zap`, as `Timed::Command.recorded_cask` does" do
+      cask = stub_cask("foo")
+      allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
+      allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(true)
+      allow(Homebrew::Trust).to receive(:trusted?).and_return(false)
+      entries = Cask::DSL::ARTIFACT_DSL_METHODS.map { |key| { key.to_s => ["Foo", { "target" => "/x" }] } }
+      write_cask_receipt("foo", [*entries, { "no_such_stanza" => [] }, "app", { "binary" => "foo" }])
+      calls = []
+      Cask::DSL::ARTIFACT_DSL_METHODS.each do |key|
+        allow_any_instance_of(Cask::DSL).to receive(key) { |_dsl, *args, **options| calls << [key, args, options] }
+      end
+      Cask::Installer.new(cask, reinstall: true).load_installed_caskfile!
+      brew_calls = calls.dup
+      calls.clear
+      Timed::Command.installed_cask(cask, reinstall: true)
+      expect([calls, brew_calls.assoc(:app)]).to eq([brew_calls, [:app, ["Foo"], { target: "/x" }]])
     end
   end
 
   describe "`brew upgrade` of a cask" do
-    it "uninstalls the installed caskfile's cask and merges its config into the new cask's" do
-      expect(brew_source("cask/upgrade.rb")).to include(
-        "CaskLoader.load_from_installed_caskfile(installed_caskfile)",
-        "Installer.new(old_cask, **old_options)",
-        "new_cask.config = new_cask.default_config.merge(old_config)",
-      )
+    # `Timed::Command.installed_cask`, which loads the installed caskfile, or
+    # rebuilds the installed version from the new cask, as brew does, and
+    # `Timed::Casks.reasons`, which gives the new cask the installed one's
+    # config: otherwise the plan judges an uninstall or a target brew never
+    # touches.
+    it "uninstalls the installed caskfile's cask, or one rebuilt from it, for the new cask, which takes the " \
+       "installed cask's config" do
+      stub_cask_fetch
+      appdir = mktmpdir
+      allow_any_instance_of(Cask::Installer).to receive(:uninstall_artifacts) do |installer, successor: nil, **|
+        throw :uninstalled, [installer.cask.version.to_s, stanza_args(installer.artifacts), installer.upgrade?,
+                             successor&.token, successor&.config&.appdir.to_s]
+      end
+      casks = [stub_cask("foo", stanzas: 'app "Foo.app"', installed_stanzas: 'app "Old.app"'),
+               stub_cask("bar", stanzas: 'app "Bar.app"', installed_stanzas: "no_such_stanza")]
+      casks.each { |cask| cask.config_path.write(Cask::Config.new(explicit: { appdir: }).to_json) }
+      actual = casks.to_h { |cask| [cask.token, catch(:uninstalled) { upgrade_cask(cask) }] }
+      expected = casks.to_h do |cask|
+        installed = Timed::Command.installed_cask(cask)
+        [cask.token, [installed&.version.to_s, stanza_args(installed&.artifacts || []), true, cask.token,
+                      appdir.to_s]]
+      end
+      # Each with its one `app`, so neither side came back empty.
+      expect([actual, expected.transform_values { |uninstalled| uninstalled[1].length }])
+        .to eq([expected, { "foo" => 1, "bar" => 1 }])
     end
   end
 
   describe "the casks the wrapped commands act on" do
-    it "are, for `brew upgrade`, the outdated ones below `--minimum-version`, but not `installer manual` ones" do
-      expected = ["casks = minimum_version_casks(casks, quiet: true)",
-                  "return false if minimum_version.present? && casks.empty?", "",
-                  "outdated_casks = Cask::Upgrade.outdated_casks(", "casks,", "args:,",
-                  "force: args.force?,", "quiet: true,", "greedy: args.greedy?,",
-                  "greedy_latest: args.greedy_latest?,", "greedy_auto_updates: args.greedy_auto_updates?,",
-                  "summary_pinned: final_upgrade_summary.pinned_casks,", ")", "return true if outdated_casks.empty?",
-                  "", "manual_installer_casks = outdated_casks.select do |cask|", "cask.artifacts.any? do |artifact|",
-                  "artifact.is_a?(Cask::Artifact::Installer) && artifact.manual_install"]
-      expect("cmd/upgrade.rb" => lines_from("cmd/upgrade.rb", expected.fetch(0), expected.length))
-        .to eq("cmd/upgrade.rb" => expected)
+    # `UpgradeTimed#outdated_casks`, which picks them as brew does: otherwise
+    # the plan leaves out a cask brew upgrades, or plans one it doesn't.
+    it "are, for `brew upgrade`, the outdated ones below `--minimum-version`, but not pinned or " \
+       "`installer manual` ones" do
+      casks = { "outdated" => stub_cask("outdated"), "current" => stub_cask("current", "2.0"),
+                "manual"   => stub_cask("manual", stanzas: 'installer manual: "Foo.app"'),
+                "pinned"   => stub_cask("pinned") }
+      allow(casks.fetch("pinned")).to receive(:pinned?).and_return(true)
+      runs = { "all" => [[], casks.keys], "below 1.5" => [["--minimum-version=1.5"], ["outdated"]],
+               "below 0.5" => [["--minimum-version=0.5"], ["outdated"]] }
+      actual = runs.transform_values do |(argv, names)|
+        # `UpgradeCmd` is brew's command, not a typo of `UpgradeTimed`.
+        command = Homebrew::Cmd::UpgradeCmd.new(["--cask", *argv, *names]) # rubocop:disable Lint/NameTypo
+        command.upgrade_outdated_casks!(casks.values_at(*names), dry_run: true)
+        command.final_upgrade_summary.version_changes.map(&:name)
+      end
+      expect(actual).to eq({ "all" => ["outdated"], "below 1.5" => ["outdated"], "below 0.5" => [] })
     end
 
-    it "are, for `brew install`, the new ones and the installed, outdated ones it upgrades" do
-      expected = ["installed_casks, new_casks = casks.partition(&:installed?)", "",
-                  "fetch_casks = if Homebrew::EnvConfig.no_install_upgrade?", "new_casks", "else",
-                  "upgrade_casks = Cask::Upgrade.outdated_casks(casks, args:, force: true, quiet: true)",
-                  "new_casks | upgrade_casks", "end",
-                  "Install.ask_casks fetch_casks, skip_cask_deps: args.skip_cask_deps? if ask"]
-      expect("cmd/install.rb" => lines_from("cmd/install.rb", expected.fetch(0), expected.length))
-        .to eq("cmd/install.rb" => expected)
+    # `InstallTimed#run`'s `new_casks` and `upgrading`: otherwise the plan
+    # leaves out a cask brew installs or upgrades, or plans one it doesn't.
+    it "are, for `brew install`, the new ones and, unless `HOMEBREW_NO_INSTALL_UPGRADE` is set, the installed, " \
+       "outdated, unpinned ones it upgrades" do
+      casks = [stub_cask("new", nil), stub_cask("outdated"), stub_cask("current", "2.0"), stub_cask("pinned")]
+      allow(casks.fetch(3)).to receive(:pinned?).and_return(true)
+      allow(Homebrew::Install).to receive(:ask_casks) { |asked, **| throw :asked, asked.map(&:token) }
+      actual = [false, true].to_h do |no_upgrade|
+        ENV["HOMEBREW_NO_INSTALL_UPGRADE"] = ("1" if no_upgrade)
+        [no_upgrade, catch(:asked) { install_command(["--cask", *casks.map(&:token)], casks).run }]
+      end
+      expect(actual).to eq({ false => %w[new outdated], true => %w[new] })
     end
 
-    it "are printed by `Install.print_dry_run_casks`, which `brew install --dry-run` and the cask prompts use, " \
-       "and which returns the dependencies to install that make brew ask" do
-      ask_casks = brew_source("install.rb")[/^      def ask_casks\(.*?^      end$/m].to_s
-      expect([brew_source("cmd/install.rb").include?(
-        "Install.print_dry_run_casks(casks, skip_cask_deps: args.skip_cask_deps?, include_installed: false)",
-      ), brew_source("cmd/reinstall.rb").include?(
-        'Install.ask_casks casks, action: "reinstallation", skip_cask_deps: args.skip_cask_deps? if ask',
-      ), ask_casks.include?("dependency_names = print_dry_run_casks("),
-              ask_casks.match?(/planned_names:\s+cask_names \+ dependency_names,\n\s+requested_names: cask_names,/)])
-        .to eq([true, true, true, true])
+    # `InstallTimed#run` and `ReinstallTimed#reinstall`, which print the casks
+    # with `Install.print_dry_run_casks` and ask by
+    # `Install.ask_prompt_needed?` over the dependencies it returns:
+    # otherwise they ask where brew doesn't, or carry on where brew asks.
+    it "are printed and asked about by `Install.ask_casks` only when it would install dependencies, as " \
+       "`Install.print_dry_run_casks` prints them and returns those" do
+      stub_cask("dep", nil)
+      casks = [stub_cask("needy", nil, stanzas: 'depends_on cask: "dep"'), stub_cask("plain", nil)]
+      # The action each prompt names, and the one the tap prints with.
+      actions = { "installation" => "install", "reinstallation" => "reinstall" }
+      asked = T.let(nil, T.nilable(String))
+      allow(Homebrew::Ask).to receive(:confirm?) { |action:| asked = action }
+      runs = casks.product(actions.keys)
+      brew = runs.to_h do |cask, action|
+        asked = nil
+        printed = stdout_of { Homebrew::Install.ask_casks([cask], action:) }
+        [[cask.token, action], [asked, printed]]
+      end
+      dependencies = {}
+      tap = runs.to_h do |cask, action|
+        printed = stdout_of do
+          dependencies[cask.token] = Homebrew::Install.print_dry_run_casks([cask], action: actions.fetch(action))
+        end
+        names = [cask.full_name]
+        needed = Homebrew::Install.ask_prompt_needed?(planned_names:   names + dependencies.fetch(cask.token),
+                                                      requested_names: names)
+        [[cask.token, action], needed ? [action, printed] : [nil, ""]]
+      end
+      expect([brew, dependencies["needy"]]).to eq([tap, ["dep"]])
     end
 
-    it "are uninstalled, on upgrade, as their installed caskfile defines them, or as rebuilt from it" do
-      expect(brew_source("cask/upgrade.rb"))
-        .to include("CaskLoader.recover_from_installed_caskfile(installed_caskfile, fallback_cask: c)")
+    # `InstallTimed#run`, which prints with `include_installed: false` for
+    # `--dry-run`, and `ReinstallTimed#reinstall`, which prints with the
+    # `reinstall` action: otherwise they print other casks, or another verb,
+    # than brew.
+    it "are printed by `brew install --dry-run` without the installed ones, and asked about by " \
+       "`brew reinstall` as a reinstallation" do
+      cask = stub_cask("foo")
+      # `Reinstall` is brew's command, not a typo of `ReinstallTimed`.
+      reinstall = Homebrew::Cmd::Reinstall.new(%w[--cask foo]) # rubocop:disable Lint/NameTypo
+      allow(reinstall.args.named).to receive(:to_formulae_and_casks_and_unavailable).and_return([cask])
+      given = [options_given(install_command(%w[--cask --dry-run foo], [cask]),
+                             [[Homebrew::Install, :print_dry_run_casks]]),
+               options_given(reinstall, [[Homebrew::Install, :ask_casks]])]
+      expect(given).to eq([{ print_dry_run_casks: { skip_cask_deps: false, include_installed: false } },
+                           { ask_casks: { action: "reinstallation", skip_cask_deps: false } }])
     end
   end
 
@@ -632,10 +848,26 @@ RSpec.describe "brew internals", type: :system do
     end
   end
 
-  it "rolls back a failed cask upgrade" do
-    revert_lines = brew_source("cask/upgrade.rb").lines.grep(/revert_upgrade/).map(&:strip)
-    expect("cask/upgrade.rb" => revert_lines)
-      .to eq("cask/upgrade.rb" => ["old_cask_installer.revert_upgrade(predecessor: new_cask) if started_upgrade"])
+  # `Timed::Casks.plan`, which skips a cask upgrade that needs sudo when it
+  # can't prompt, as the rollback of a failed one reinstalls the installed
+  # cask and may need sudo too: otherwise that rollback stops at a prompt
+  # nobody can answer.
+  it "rolls back a failed cask upgrade that has started, reinstalling the installed cask" do
+    stub_cask_fetch
+    allow_any_instance_of(Cask::Installer).to receive_messages(uninstall_artifacts: nil, stage: nil)
+    reverted = []
+    allow_any_instance_of(Cask::Installer).to receive(:revert_upgrade) do |installer, predecessor:|
+      reverted << [installer.cask.version.to_s, predecessor.version.to_s]
+    end
+    failures = { "fetch" => :fetch, "install" => :install_artifacts }
+    actual = failures.to_h do |name, method|
+      reverted.clear
+      allow_any_instance_of(Cask::Installer).to receive(method).and_raise(Cask::CaskError, "failed")
+      upgrade_cask(stub_cask(name))
+      allow_any_instance_of(Cask::Installer).to receive(method).and_return(nil)
+      [name, reverted.dup]
+    end
+    expect(actual).to eq({ "fetch" => [], "install" => [["1.0", "2.0"]] })
   end
 
   describe "Homebrew::Ask.confirm?" do
@@ -679,13 +911,6 @@ RSpec.describe "brew internals", type: :system do
     it "is a no-op with `HOMEBREW_AUTO_UPDATE_CHECKED` set" do
       expect(update_if_needed("HOMEBREW_AUTO_UPDATE_CHECKED" => "1")).to eq("not exec'd\n")
     end
-  end
-
-  # The lines of brew's `path` from the one that is `first` on, stripped and
-  # with runs of spaces squeezed.
-  def lines_from(path, first, count)
-    lines = brew_source(path).lines.map { |line| line.strip.squeeze(" ") }
-    lines.index(first)&.then { |index| lines[index, count] }
   end
 
   # A formula named `name` with nothing more than a URL, in the tap `tap`
