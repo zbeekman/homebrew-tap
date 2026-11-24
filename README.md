@@ -8,6 +8,19 @@ Or `brew tap zbeekman/tap`, trust the formula with
 See [Tap Trust](https://docs.brew.sh/Tap-Trust).
 
 ## Formulae
+- `opencoarrays-mpich`: OpenCoarrays, the Coarray Fortran library and its
+  `caf` and `cafrun` wrappers, built with GCC and MPICH rather than
+  homebrew/core's `opencoarrays`, which uses Open MPI. It conflicts with
+  `opencoarrays`, as both install `caf` and `cafrun`, and its `mpich`
+  dependency conflicts with `open-mpi`. So uninstall `opencoarrays` first,
+  and, if `open-mpi` is still installed (you installed it yourself, or another
+  formula needs it), unlink it:
+
+  ```sh
+  brew uninstall opencoarrays
+  brew unlink open-mpi    # only if it is still installed
+  brew install zbeekman/tap/opencoarrays-mpich
+  ```
 - `openjdk`: homebrew/core's `openjdk`, built from source on Intel macOS too,
   which homebrew/core no longer supports. Formulae that depend on `openjdk`,
   such as `antlr`, use it as long as its version matches homebrew/core's.
