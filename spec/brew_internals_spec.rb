@@ -39,17 +39,20 @@ RSpec.describe "brew internals", type: :system do
   # anything else as brew loads it.
   before { allow(Cask::CaskLoader).to receive(:loader_for).and_call_original }
 
-  def brew_source(path) = (HOMEBREW_LIBRARY_PATH/path).read
+  # The executable of each command brew runs as root from here on, with sudo
+  # available: a command it runs without sudo runs as it is, and one it runs
+  # with sudo succeeds without running.
+  def root_commands
+    ran = []
+    allow(SystemCommand).to receive(:sudo_available?).and_return(true)
+    allow(SystemCommand).to receive(:new).and_wrap_original do |new, executable, sudo: false, **options|
+      next new.call(executable, sudo:, **options) unless sudo
 
-  # `[command, sudo]` for each `run`/`run!` call with a `sudo:` argument.
-  def sudo_calls(path)
-    brew_source(path)
-      .scan(/\.run!?[\s(]+"([^"]+)"(?:(?!\.run!?[\s(]).)*?sudo:\s*(nil|true)/m)
+      ran << executable.to_s
+      instance_double(SystemCommand, run!: instance_double(SystemCommand::Result, success?: true, stdout: ""))
+    end
+    ran
   end
-
-  # The value of every `sudo:` keyword in the file, whatever the call looks
-  # like; shorthand `sudo:` gives `""`.
-  def sudo_values(path) = brew_source(path).scan(/\bsudo:[ \t]*([^,)\s]*)/).flatten
 
   # `stanza` is Cask DSL source: Sorbet cannot see the DSL's generated methods.
   def artifacts(stanza, config: nil)
@@ -219,53 +222,152 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "cask file-permission sudo fallbacks" do
-    let(:expected_sudo_calls) do
-      {
-        "cask/artifact/moved.rb"                   => [["/bin/cp", "nil"], ["/bin/cp", "nil"], ["/bin/cp", "nil"]],
-        "cask/artifact/symlinked.rb"               => [["/bin/ln", "nil"]],
-        "extend/os/mac/cask/artifact/symlinked.rb" => [["/bin/ln", "nil"]],
-        "cask/utils.rb"                            => [["mkdir", "nil"], ["rmdir", "nil"], ["/bin/rm", "nil"],
-                                                       ["chown", "true"]],
+    # `Timed::Casks.unwritable_directories` and `.replaced_bundles`: otherwise
+    # the plan misses a sudo prompt brew raises to move a bundle, to link or
+    # unlink a binary, or to back up a bundle it replaces, or holds back a
+    # cask for one it never raises.
+    it "run as root only to move or link into, or unlink from, a directory the user can't write, or to back up " \
+       "a bundle with a file the user can't read, as `Timed::Casks.reasons` judges" do
+      ran = root_commands
+      allow(Cask::Quarantine).to receive_messages(app_management_permissions_granted?: true, copy_xattrs: nil)
+      dir = mktmpdir
+      # `[stanza, its target in `dir`, the phase brew runs]`, with a source of
+      # the target's name.
+      cases = {
+        "move into a writable directory"                   => ["app", "w/a.app", :install],
+        "move into a read-only one"                        => ["app", "ro/b.app", :install],
+        "move into a missing directory in a read-only one" => ["app", "ro/new/c.app", :install],
+        "link into a writable directory"                   => ["binary", "w/d", :install],
+        "link into a read-only one"                        => ["binary", "ro/e", :install],
+        "unlink from a read-only directory"                => ["binary", "ro/f", :uninstall],
+        "back up a readable bundle"                        => ["app", "w/g.app", :uninstall],
+        "back up a bundle with an unreadable file"         => ["app", "w/h.app", :uninstall],
+        "upgrade into an emptied, read-only bundle"        => ["app", "w/i.app", :upgrade],
       }
+      (dir/"w").mkpath
+      relocated = cases.to_h do |name, (stanza, path, phase)|
+        target = dir/path
+        artifact = artifacts("#{stanza} \"#{target.basename}\", target: \"#{target}\"").to_a.fetch(0)
+        source = artifact.source
+        if artifact.is_a?(Cask::Artifact::App)
+          bundle = source
+          bundle = target if phase == :uninstall
+          (bundle/"Contents").mkpath
+          (bundle/"Contents/f").write("")
+          (bundle/"Contents/f").chmod(0) if name.end_with?("unreadable file")
+          # What brew's uninstall of the old version leaves.
+          target.mkpath if phase == :upgrade
+        else
+          source.dirname.mkpath
+          source.write("")
+          source.chmod(0755)
+          if phase == :uninstall
+            target.dirname.mkpath
+            target.make_symlink(source)
+          end
+        end
+        [name, [artifact, phase]]
+      end
+      read_only = [dir/"ro", dir/"w/i.app"]
+      read_only.each { |path| path.chmod(0555) }
+      actual = relocated.transform_values do |(artifact, phase)|
+        judged = Timed::Casks.reasons(artifact.cask, old: nil, upgrading: phase != :install, zap: false,
+                                      force: false, facts: Timed::Casks::DiskFacts.new, macos: false)
+        ran.clear
+        if phase == :uninstall
+          artifact.uninstall_phase(command: SystemCommand)
+        else
+          artifact.install_phase(predecessor: (artifact.cask if phase == :upgrade), command: SystemCommand)
+        end
+        [ran.any?, judged.any? { |reason| reason.kind == :sudo }]
+      end
+      expect(actual).to eq({ "move into a writable directory"                   => [false, false],
+                             "move into a read-only one"                        => [true, true],
+                             "move into a missing directory in a read-only one" => [true, true],
+                             "link into a writable directory"                   => [false, false],
+                             "link into a read-only one"                        => [true, true],
+                             "unlink from a read-only directory"                => [true, true],
+                             "back up a readable bundle"                        => [false, false],
+                             "back up a bundle with an unreadable file"         => [true, true],
+                             "upgrade into an emptied, read-only bundle"        => [true, true] })
+    ensure
+      read_only&.each { |path| path.chmod(0755) }
     end
 
-    it "runs the same commands with `sudo:` in each file" do
-      expect(expected_sudo_calls.to_h { |path, _calls| [path, sudo_calls(path)] }).to eq(expected_sudo_calls)
-    end
-
-    it "has no other `sudo:` arguments in each file" do
-      expect(expected_sudo_calls.to_h { |path, _calls| [path, sudo_values(path)] })
-        .to eq(expected_sudo_calls.transform_values { |calls| calls.map(&:last) })
-    end
-
-    it "still goes through Cask::Utils.gain_permissions_* in `moved.rb` and `symlinked.rb`" do
-      helpers = %w[cask/artifact/moved.rb cask/artifact/symlinked.rb extend/os/mac/cask/artifact/symlinked.rb]
-                .flat_map { |path| brew_source(path).scan(/Utils\.(gain_permissions_\w+)/).flatten }
-      expect(helpers.uniq).to contain_exactly("gain_permissions_mkpath", "gain_permissions_remove")
+    # `Timed::Casks.replaced_bundles`, which counts an entry the user doesn't
+    # own in a bundle brew deletes: otherwise the plan misses that sudo prompt.
+    it "take ownership as root of a path the user doesn't own when removing it fails" do
+      ran = root_commands
+      allow(Cask::Utils).to receive(:ownership_problem?).and_return(true)
+      path = mktmpdir/"f"
+      path.write("")
+      tries = 0
+      # Fails until brew has tried both its permission fix and `chown`.
+      Cask::Utils.gain_permissions(path, [], SystemCommand) { raise Errno::EACCES if (tries += 1) < 3 }
+      expect(ran).to eq(["chown"])
     end
   end
 
   describe "`Relocated#add_altname_metadata`" do
-    it "runs `chmod` and `xattr -w` with `sudo: nil`" do
-      expect(sudo_calls("cask/artifact/relocated.rb")).to eq([["chmod", "nil"], ["/usr/bin/xattr", "nil"]])
-    end
-
-    it "has no other `sudo:` arguments" do
-      expect(sudo_values("cask/artifact/relocated.rb")).to eq(["nil", "nil"])
-    end
-
-    it "changes the target of a bundle" do
-      expect(brew_source("cask/artifact/moved.rb")).to include("add_altname_metadata(target, source.basename")
-    end
-
-    it "changes the source of a link on macOS" do
-      expect(brew_source("extend/os/mac/cask/artifact/symlinked.rb"))
-        .to include("add_altname_metadata(source, target.basename")
-    end
-
-    it "does nothing when the names match, ignoring case" do
-      expect(brew_source("cask/artifact/relocated.rb"))
-        .to include("return if altname.to_s.casecmp(file.basename.to_s)&.zero?")
+    # `Timed::Casks.altname_metadata`, which checks that the user owns and can
+    # write the file brew changes, and its realpath: otherwise the plan misses
+    # a sudo prompt, or holds back a cask for one brew never raises.
+    it "changes, with `sudo: nil`, a renamed bundle's target and a renamed link's source, and their realpaths, " \
+       "unless only the case differs, as `Timed::Casks.altname_metadata` checks", :needs_macos do
+      root_commands
+      changing = T.let(false, T::Boolean)
+      changed = []
+      allow(SystemCommand).to receive(:run).and_wrap_original do |run, executable, **options|
+        sudo = options.fetch(:sudo, false)
+        if changing && sudo != false
+          paths = options.fetch(:args, []).filter_map { |arg| Pathname(arg) if arg.to_s.start_with?("/") }
+          changed.concat(paths.map { |path| [path, sudo] })
+        end
+        run.call(executable, **options)
+      end
+      # Hooked by name: only the commands `add_altname_metadata` runs count.
+      allow_any_instance_of(Cask::Artifact::Relocated).to receive(:add_altname_metadata)
+        .and_wrap_original do |add, *args, **options|
+          changing = true
+          result = add.call(*args, **options)
+          changing = false
+          result
+        end
+      dir = mktmpdir
+      stanzas = { "bundle"            => "app \"a.app\", target: \"#{dir}/b.app\"",
+                  "bundle, case only" => "app \"c.app\", target: \"#{dir}/C.app\"",
+                  "link"              => "binary \"d\", target: \"#{dir}/e\"",
+                  "link, same name"   => "binary \"f\", target: \"#{dir}/f\"" }
+      checked = []
+      facts = Timed::Casks::DiskFacts.new
+      allow(facts).to receive(:lstat).and_wrap_original do |lstat, path|
+        checked << path
+        lstat.call(path)
+      end
+      brew = {}
+      tap = stanzas.to_h do |name, stanza|
+        artifact = artifacts(stanza).to_a.fetch(0)
+        if artifact.is_a?(Cask::Artifact::App)
+          (artifact.source/"Contents").mkpath
+        else
+          # A source linked to a file elsewhere, so its realpath differs.
+          real = dir/"real"/artifact.source.basename
+          real.dirname.mkpath
+          real.write("")
+          real.chmod(0755)
+          artifact.source.dirname.mkpath
+          artifact.source.make_symlink(real)
+        end
+        changed.clear
+        artifact.install_phase(command: SystemCommand)
+        brew[name] = changed.uniq
+        checked.clear
+        Timed::Casks.altname_metadata(artifact.cask, facts:)
+        [name, checked.uniq.map { |path| [path, nil] }]
+      end
+      # The number of paths changed: a link's source and its realpath are two.
+      expect([brew, brew.transform_values(&:length)])
+        .to eq([tap, { "bundle" => 1, "bundle, case only" => 0, "link" => 2, "link, same name" => 0 }])
     end
 
     it "runs commands only on macOS, so it is a no-op on Linux" do
@@ -284,25 +386,75 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "`sudo: :if_needed` install steps" do
-    it "checks `dirname.writable?` of a removed path and of a symlink's target" do
-      checked = brew_source("install_steps.rb").scan(/step\["sudo"\] == "if_needed" && !(\w+)\.dirname\.writable\?/)
-      expect(checked.flatten).to eq(["path", "target", "target"])
+    # `Timed::Casks.if_needed_reasons`: otherwise the plan misses a sudo
+    # prompt, or holds back a cask that never needs sudo.
+    it "remove a path, link to a path, or link a `source_glob`'s match into a target directory, as root only " \
+       "when the directory they change isn't writable, as `Timed::Casks.if_needed_reasons` judges" do
+      ran = root_commands
+      dir = mktmpdir
+      %w[w/ro ro/w glob].each { |path| (dir/path).mkpath }
+      %w[w/file ro/file glob/one.txt source].each { |path| (dir/path).write("") }
+      at = ->(path) { { "path" => (dir/path).to_s } }
+      link = { "type" => "symlink", "source" => at.call("source"), "sudo" => "if_needed" }
+      glob = link.merge("source" => at.call("glob/*.txt"), "source_glob" => true)
+      remove = ->(path) { { "type" => "remove", "paths" => [at.call(path)], "sudo" => "if_needed" } }
+      steps = {
+        "remove from a writable directory"                  => remove.call("w/file"),
+        "remove from a read-only one"                       => remove.call("ro/file"),
+        "link into a writable directory"                    => link.merge("target" => at.call("w/link")),
+        "link into a read-only one"                         => link.merge("target" => at.call("ro/link")),
+        "glob into a writable directory in a read-only one" => glob.merge("target" => at.call("ro/w")),
+        "glob into a read-only directory in a writable one" => glob.merge("target" => at.call("w/ro")),
+      }
+      read_only = [dir/"ro", dir/"w/ro"]
+      read_only.each { |path| path.chmod(0555) }
+      cask = Cask::Cask.new("timed-canary")
+      runner = Homebrew::InstallSteps::Runner.new(context: cask)
+      actual = steps.transform_values do |step|
+        judged = Timed::Casks.if_needed_reasons(cask, :postflight_steps, step, facts: Timed::Casks::DiskFacts.new)
+        ran.clear
+        runner.run([step])
+        [ran.any?, judged.any?]
+      end
+      expect(actual).to eq({ "remove from a writable directory"                  => [false, false],
+                             "remove from a read-only one"                       => [true, true],
+                             "link into a writable directory"                    => [false, false],
+                             "link into a read-only one"                         => [true, true],
+                             "glob into a writable directory in a read-only one" => [false, false],
+                             "glob into a read-only directory in a writable one" => [true, true] })
+    ensure
+      read_only&.each { |path| path.chmod(0755) }
     end
   end
 
   describe "optional install steps" do
-    it "counts for sudo only when `include_optional` is set, which `requires_sudo?` leaves out" do
-      expect(brew_source("install_steps.rb")).to include(
-        '(include_optional && (step["sudo"] == "if_needed" || step["type"] == "set_ownership"))',
-      )
-      expect(brew_source("cask/artifact/install_steps.rb"))
-        .to include("sudo_required?(steps, include_optional: false)")
+    # `Timed::Casks.uninstall_steps`, which asks `sudo_required?` with
+    # `include_optional: false` whether `Uninstall*Steps` run a step as root,
+    # and judges `if_needed` and `set_ownership` steps itself: otherwise the
+    # plan holds back a cask for a step that may not need sudo.
+    it "count for `sudo_required?` with `include_optional: false` only when run as root" do
+      paths = [{ "path" => "/opt/timed-canary/f" }]
+      steps = { "as root"       => { "type" => "remove", "paths" => paths, "sudo" => true },
+                "if_needed"     => { "type" => "remove", "paths" => paths, "sudo" => "if_needed" },
+                "set_ownership" => { "type" => "set_ownership", "paths" => paths },
+                "neither"       => { "type" => "remove", "paths" => paths } }
+      runner = Homebrew::InstallSteps::Runner.new(context: Object.new)
+      expect(steps.transform_values { |step| runner.sudo_required?([step], include_optional: false) })
+        .to eq({ "as root" => true, "if_needed" => false, "set_ownership" => false, "neither" => false })
     end
   end
 
   describe "`requires_sudo?` of install steps" do
-    it "is false unless the artifact has an `install_phase`, so `Uninstall*Steps` never count" do
-      expect(brew_source("cask/artifact/install_steps.rb")).to include("respond_to?(:install_phase) &&")
+    # `Timed::Casks.install_steps`, which leaves `Uninstall*Steps` to
+    # `.uninstall_steps` on upgrade and reinstall, so `.requires_sudo` must
+    # not count them: otherwise the plan holds back the install of a cask for
+    # an uninstall step brew doesn't run then.
+    it "is false for `Uninstall*Steps`, even with a step run as root, unlike `preflight_steps`" do
+      step = '[{ type: "run", executable: "/usr/bin/true", sudo: true }]'
+      stanzas = %w[preflight_steps uninstall_preflight_steps uninstall_postflight_steps]
+      expect(stanzas.to_h { |stanza| [stanza, artifacts("#{stanza} steps: #{step}").any?(&:requires_sudo?)] })
+        .to eq({ "preflight_steps" => true, "uninstall_preflight_steps" => false,
+                 "uninstall_postflight_steps" => false })
     end
 
     it "is not defined on `Uninstall*Steps`" do
@@ -505,32 +657,45 @@ RSpec.describe "brew internals", type: :system do
       expect(outcomes).to eq(false => [true, []], true => [false, [app.target]])
     end
 
-    it "is reached through the `force` that `brew install` passes to the cask installer" do
-      # One entry per call, in `#fetch_installers` then `#install_casks`.
-      calls = brew_source("cmd/install.rb").scan(/Cask::Installer\.new\(\n.*?^ +\)$/m)
-      installer = brew_source("cask/installer.rb")
-      expect([calls.map { |call| call.match?(/^\s+force:\s+args\.force\?,$/) },
-              installer.include?("force: force?, predecessor:"),
-              brew_source("cask/artifact/moved.rb").include?("move(adopt:, auto_updates:, force:,")])
-        .to eq([[true, true], true, true])
-    end
-  end
-
-  describe "`symlink` install step with `source_glob`" do
-    it "links into a target directory, so `if_needed` checks that directory" do
-      body = brew_source("install_steps.rb")[/^        when "symlink"\n.*?^        when "write"/m]
-      expect(body.lines.map(&:strip).grep(/sources\.length|mkpath|create_symlink/))
-        .to eq(["if sources.length > 1 || target.directory?", "target.mkpath",
-                "sources.each { |source| create_symlink(source, target/source.basename, step) }",
-                "create_symlink(source, target, step) if source",
-                "create_symlink(link_source(step_path(step, \"source\")), target, step)"])
+    # `InstallTimed#run`, which passes `force: args.force?` to
+    # `Timed::Command.cask_plan`, whose `Timed::Casks.replaced_bundles` then
+    # judges the bundles a new cask overwrites: otherwise the plan misses the
+    # sudo prompt of that overwrite, or holds back a cask for nothing.
+    it "is passed by `brew install --force` to each bundle the cask installer moves, also when the installer " \
+       "is made again as queueing its download failed" do
+      stub_cask_fetch
+      allow(Homebrew::Install).to receive_messages(ask_casks: nil, fetch_cask_dependencies: nil)
+      allow_any_instance_of(Cask::Installer).to receive(:stage)
+      allow_any_instance_of(Cask::Artifact::App).to receive(:install_phase) { |_app, force:, **| throw :moved, force }
+      cask = stub_cask("foo", nil, stanzas: 'app "Foo.app"')
+      # `[flags, whether queueing the download fails]`
+      runs = { "--force" => [["--force"], false], "without" => [[], false],
+               "--force, queueing failed" => [["--force"], true] }
+      actual = runs.transform_values do |(flags, fails)|
+        allow_any_instance_of(Cask::Installer).to receive(:enqueue_downloads) { raise "failed" if fails }
+        catch(:moved) do
+          install_command(["--cask", *flags, "foo"], [cask]).run
+          :not_moved
+        end
+      end
+      expect(actual).to eq({ "--force" => true, "without" => false, "--force, queueing failed" => true })
     end
   end
 
   describe "`SystemCommand.run` with `sudo: nil`" do
-    it "retries with sudo when the command fails, which `set_ownership`'s `chown` relies on" do
-      retry_block = brew_source("system_command.rb")[/^    if sudo\.nil\?\n.*?^    end$/m]
-      expect(retry_block).to match(/return result\n\s+end\n\s+sudo = true\n/)
+    # `Timed::Casks.step_reasons`, `.if_needed_reasons`, `.removed_links`,
+    # `.altname_metadata`, `.replaced_bundles` and `.unwritable_directories`,
+    # which count a command brew runs with `sudo: nil` (e.g. the `/bin/rm` of
+    # `gain_permissions_remove`) as a sudo prompt only where it fails without:
+    # otherwise the plan misses that prompt, or holds back a cask for nothing.
+    it "retries a command with sudo only when it fails without" do
+      ran = root_commands
+      actual = { "fails" => "false", "succeeds" => "true" }.transform_values do |executable|
+        ran.clear
+        SystemCommand.run(executable, sudo: nil)
+        ran.dup
+      end
+      expect(actual).to eq({ "fails" => ["false"], "succeeds" => [] })
     end
   end
 
@@ -825,26 +990,65 @@ RSpec.describe "brew internals", type: :system do
   end
 
   describe "the cask installer's dependencies" do
-    it "installs a missing cask dependency before the cask, unless `--skip-cask-deps` is set" do
-      source = brew_source("cask/installer.rb")
-      def_lines = ->(name) { source[/^    def #{name}\b.*?^    end$/m].to_s.lines.map(&:strip) }
-      install_missing = "cask_installers.reject { |installer| installer.cask.installed? }.each(&:install)"
-      wanted = {
-        "fetch"                                 => "satisfy_cask_and_formula_dependencies",
-        "satisfy_cask_and_formula_dependencies" => install_missing,
-        "missing_cask_and_formula_dependencies" => "cask_or_formula.installed?",
-        "dependency_installers"                 => "next if skip_cask_deps?",
-      }
-      expect(wanted.to_h { |name, line| [name, def_lines.call(name).include?(line)] })
-        .to eq(wanted.transform_values { true })
+    # `Timed::Command.cask_needs`, whose missing casks `.cask_plan` counts for
+    # a cask, unless `--skip-cask-deps` is set, and `Timed::Casks.plan`, which
+    # judges those installs without `force`: otherwise the plan misses a
+    # dependency's sudo prompt, or holds back a cask for an install brew
+    # doesn't run.
+    it "are installed before the cask, without `force`, if missing, unless `--skip-cask-deps` is set, as " \
+       "`Timed::Command.cask_needs` finds them" do
+      stub_cask("installed-dep")
+      stub_cask("missing-dep", nil)
+      cask = stub_cask("foo", nil, stanzas: 'depends_on cask: ["installed-dep", "missing-dep"]')
+      allow_any_instance_of(Cask::Installer)
+        .to receive_messages(record_caveats: nil, download: nil,
+                             primary_container: instance_double(UnpackStrategy, dependencies: []))
+      installed = []
+      allow_any_instance_of(Cask::Installer).to receive(:install).and_wrap_original do |install|
+        installer = install.receiver
+        next install.call if installer.cask.equal?(cask)
+
+        installed << [installer.cask.token, installer.force?]
+      end
+      allow_any_instance_of(Cask::Installer).to receive(:stage) { |installer| throw :staged, installer.cask.token }
+      actual = { "without" => false, "--skip-cask-deps" => true }.transform_values do |skip_cask_deps|
+        installed.clear
+        staged = catch(:staged) { Cask::Installer.new(cask, force: true, skip_cask_deps:).install }
+        [*installed, staged]
+      end
+      missing = Timed::Command.cask_needs(cask).casks.reject(&:installed?).map { |dependency| [dependency.token, false] }
+      expect([actual, missing]).to eq([{ "without" => [*missing, "foo"], "--skip-cask-deps" => ["foo"] },
+                                       [["missing-dep", false]]])
     end
   end
 
   describe "`set_ownership` install steps" do
-    it "fails without App Management permission, and runs `chown` with `sudo: nil`" do
-      body = brew_source("install_steps.rb")[/^      def run_set_ownership\(step\)\n.*?^      end$/m]
-      expect(body).to match(/app_management_permissions_granted\?.*raise ::Cask::CaskError/m)
-      expect(body).to match(/@command\.run!\("chown".*?sudo: nil\)/m)
+    # `Timed::Casks.step_reasons`, which gives a `set_ownership` step a sudo
+    # reason, for its `chown`, and a dialog, for App Management: otherwise the
+    # plan misses a sudo prompt, or a step that fails without that permission.
+    it "fail without App Management permission, and otherwise run `chown` with `sudo: nil`" do
+      path = mktmpdir/"Foo.app"
+      path.mkpath
+      calls = []
+      [:run, :run!].each do |method|
+        allow(SystemCommand).to receive(method) do |executable, sudo: false, **|
+          calls << [executable, sudo]
+          instance_double(SystemCommand::Result, success?: true, stdout: "")
+        end
+      end
+      step = { "type" => "set_ownership", "paths" => [{ "path" => path.to_s }] }
+      actual = [true, false].to_h do |granted|
+        allow(Cask::Quarantine).to receive(:app_management_permissions_granted?).and_return(granted)
+        calls.clear
+        outcome = begin
+          Homebrew::InstallSteps::Runner.new(context: "timed-canary").run([step])
+          calls.dup
+        rescue Cask::CaskError
+          :failed
+        end
+        [granted, outcome]
+      end
+      expect(actual).to eq({ true => [["chown", nil]], false => :failed })
     end
   end
 
