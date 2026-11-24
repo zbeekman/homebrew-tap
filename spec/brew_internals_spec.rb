@@ -114,10 +114,11 @@ RSpec.describe "brew internals", type: :system do
   end
 
   # The receipt of the installed cask `token`, which recorded
-  # `uninstall_artifacts`.
-  def write_cask_receipt(token, uninstall_artifacts)
+  # `uninstall_artifacts`, and the tap `tap` (none when nil), read afresh.
+  def write_cask_receipt(token, uninstall_artifacts, tap: nil)
     (HOMEBREW_PREFIX/"Caskroom/#{token}/.metadata/INSTALL_RECEIPT.json")
-      .write(JSON.generate("uninstall_artifacts" => uninstall_artifacts))
+      .write(JSON.generate("uninstall_artifacts" => uninstall_artifacts, "source" => { "tap" => tap }))
+    Cask::Tab.clear_cache
   end
 
   # The DSL key and arguments of each of `artifacts`, in a stable order.
@@ -656,17 +657,23 @@ RSpec.describe "brew internals", type: :system do
     # `Timed::Command.installed_cask`, whose trust guard picks the cask a
     # reinstall uninstalls, and `.recorded_cask`: otherwise the plan judges
     # an uninstall brew doesn't run, or misses one it does.
-    it "uninstalls, on reinstall, the installed caskfile's cask, but for a cask that isn't trusted, with tap " \
-       "trust on, the new cask with the artifacts its install recorded, as `Timed::Command.installed_cask` does" do
+    it "uninstalls, on reinstall, the installed caskfile's cask, but for a cask that isn't trusted, by the " \
+       "receipt's tap or else its own, with tap trust on, the new cask with the artifacts its install recorded, " \
+       "as `Timed::Command.installed_cask` does" do
       installed = "app \"Old.app\"\nuninstall quit: \"com.old\"\nzap trash: \"~/old\""
       cask = stub_cask("foo", stanzas: 'zap trash: "~/new"', installed_stanzas: installed)
       allow(cask).to receive(:tap).and_return(Tap.fetch("user", "tap"))
-      write_cask_receipt("foo", [{ "app" => ["Old.app"] }, { "uninstall" => [{ "quit" => "com.old" }] }])
-      # `[tap trust on, cask trusted]`
-      runs = { "trusted" => [true, true], "untrusted" => [true, false], "trust off" => [false, false] }
-      actual = runs.to_h do |run, (trust_on, trusted)|
+      uninstall_artifacts = [{ "app" => ["Old.app"] }, { "uninstall" => [{ "quit" => "com.old" }] }]
+      # `[tap trust on, the receipt's tap, the casks trusted]`
+      runs = { "trusted"               => [true, nil, ["user/tap/foo"]],
+               "untrusted"             => [true, nil, []],
+               "trust off"             => [false, nil, []],
+               "receipt's tap trusted" => [true, "other/tap", ["other/tap/foo"]],
+               "only own tap trusted"  => [true, "other/tap", ["user/tap/foo"]] }
+      actual = runs.to_h do |run, (trust_on, receipt_tap, trusted)|
+        write_cask_receipt("foo", uninstall_artifacts, tap: receipt_tap)
         allow(Homebrew::EnvConfig).to receive(:require_tap_trust?).and_return(trust_on)
-        allow(Homebrew::Trust).to receive(:trusted?).and_return(trusted)
+        allow(Homebrew::Trust).to receive(:trusted?) { |type, name| type == :cask && trusted.include?(name) }
         installer = Cask::Installer.new(cask, reinstall: true)
         installer.load_installed_caskfile!
         # What `Installer#uninstall` and `#zap` act on.
@@ -678,7 +685,8 @@ RSpec.describe "brew internals", type: :system do
         same = brew == tap
         [run, same ? brew.first : [brew, tap]]
       end
-      expect(actual).to eq({ "trusted" => "1.0", "untrusted" => "2.0", "trust off" => "1.0" })
+      expect(actual).to eq({ "trusted" => "1.0", "untrusted" => "2.0", "trust off" => "1.0",
+                             "receipt's tap trusted" => "1.0", "only own tap trusted" => "2.0" })
     end
 
     # `Timed::Command.recorded_cask`, which replays the receipt as brew does:
