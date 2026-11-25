@@ -291,20 +291,35 @@ RSpec.describe "brew internals", type: :system do
                              "back up a bundle with an unreadable file"         => [true, true],
                              "upgrade into an emptied, read-only bundle"        => [true, true] })
     ensure
-      read_only&.each { |path| path.chmod(0755) }
+      # Only what's left, so a run that removes `w/i.app` reports its failure.
+      read_only&.each { |path| path.chmod(0755) if path.exist? }
     end
 
     # `Timed::Casks.replaced_bundles`, which counts an entry the user doesn't
     # own in a bundle brew deletes: otherwise the plan misses that sudo prompt.
-    it "take ownership as root of a path the user doesn't own when removing it fails" do
-      ran = root_commands
-      allow(Cask::Utils).to receive(:ownership_problem?).and_return(true)
-      path = mktmpdir/"f"
-      path.write("")
+    it "take ownership as root of a bundle with a path the user doesn't own when removing it fails" do
+      # So the `chown` brew runs with sudo succeeds without running.
+      root_commands
+      bundle = mktmpdir/"a.app"
+      (bundle/"Contents").mkpath
+      allow(Cask::Utils).to receive(:ownership_problem?).with(bundle, recursive: true).and_return(true)
+      # `[executable, whether it's recursive]` of each command run as root.
+      ran = []
+      allow(SystemCommand).to receive(:run).and_wrap_original do |run, executable, **options|
+        ran << [executable, options.fetch(:args, []).include?("-R")] if options.fetch(:sudo, false)
+        run.call(executable, **options)
+      end
       tries = 0
-      # Fails until brew has tried both its permission fix and `chown`.
-      Cask::Utils.gain_permissions(path, [], SystemCommand) { raise Errno::EACCES if (tries += 1) < 3 }
-      expect(ran).to eq(["chown"])
+      # Brew removes a bundle with `FileUtils.rm_r`, failing here until brew
+      # has tried both its permission fix and `chown`.
+      allow(FileUtils).to receive(:rm_r).and_wrap_original do |rm_r, *args, **options|
+        raise Errno::EACCES if (tries += 1) < 3
+
+        rm_r.call(*args, **options)
+      end
+      # As `Moved#delete` removes a bundle.
+      Cask::Utils.gain_permissions_remove(bundle)
+      expect(ran).to eq([["chown", true]])
     end
   end
 
@@ -423,7 +438,8 @@ RSpec.describe "brew internals", type: :system do
                              "glob into a writable directory in a read-only one" => [false, false],
                              "glob into a read-only directory in a writable one" => [true, true] })
     ensure
-      read_only&.each { |path| path.chmod(0755) }
+      # Only what's left, so a run that removes `w/ro` reports its failure.
+      read_only&.each { |path| path.chmod(0755) if path.exist? }
     end
   end
 
@@ -569,7 +585,8 @@ RSpec.describe "brew internals", type: :system do
                              "make under a writable one"     => [],
                              "make under an unwritable one"  => [["mkdir", nil]] })
     ensure
-      (dir/"ro").chmod(0755) if dir
+      # Only if it's left, so a run that removes it reports its failure.
+      (dir/"ro").chmod(0755) if dir && (dir/"ro").exist?
     end
   end
 
@@ -816,7 +833,8 @@ RSpec.describe "brew internals", type: :system do
                    "sudo, unwritable" => [["/bin/rm", nil]], "elsewhere, unwritable" => :kept }
       expect(actual).to eq({ preflight_steps: expected, postflight_steps: expected })
     ensure
-      dirs&.each { |dir| dir.chmod(0755) }
+      # Only what's left, so a run that removes one reports its failure.
+      dirs&.each { |dir| dir.chmod(0755) if dir.exist? }
     end
 
     # `Timed::Command.installed_cask`, whose trust guard picks the cask a
