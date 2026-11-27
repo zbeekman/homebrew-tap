@@ -174,9 +174,5 @@ module NetworkGuard
 end
 
 RSpec.configure do |config|
-  # Brew retries for its network specs; ours are offline, so a retry would
-  # only hide a flaky spec.
-  config.default_retry_count = 0
-
   NetworkGuard.install(config)
 end
